@@ -317,6 +317,34 @@ except: pass
             printf '\e[7;1H%s' "$_jukebox_art_text"
         fi
 
+        # upcoming queue on the right (Coming Up Next)
+        if [[ -n "$pl_pos" ]]; then
+            local pl_json=$(_jukebox_fast_get "playlist")
+            local next_tracks=(${(f)"$(echo "$pl_json" | jq -r --arg pos "$pl_pos" '.data | .[($pos|tonumber)+1 : ($pos|tonumber)+11] | .[]? | .filename | split("/")[-1] | split(".flac")[0]' 2>/dev/null)"})
+            
+            # calculate safe X position on the right
+            local art_w_est=$(( _art_line_count * 2 ))
+            (( art_w_est == 0 )) && art_w_est=10
+            local queue_x=$(( cols - 40 ))
+            (( queue_x < art_w_est + 6 )) && queue_x=$(( art_w_est + 6 ))
+            
+            if (( queue_x < cols - 15 )); then
+                local q_y=7
+                printf '\e[%d;%dH\e[1m🎵 Coming Up Next:\e[0m' "$q_y" "$queue_x"
+                q_y=$((q_y + 2))
+                
+                local max_len=$(( cols - queue_x - 2 ))
+                for tname in "${next_tracks[@]}"; do
+                    [[ -z "$tname" ]] && continue
+                    if (( ${#tname} > max_len )); then
+                        tname="${tname[1,$((max_len - 3))]}..."
+                    fi
+                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$tname"
+                    q_y=$((q_y + 1))
+                done
+            fi
+        fi
+
         # progress at bottom
         printf '\e[%d;1H' "$rows"
         _padline "$(_center "${label}${bar}" $cols)" $cols

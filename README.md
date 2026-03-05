@@ -3,10 +3,9 @@
 Terminal FLAC Player with Kitty graphics for album art!
 
 > [!IMPORTANT]
-> This project was entirely created by LLMs, and should not be used as a product nor expect to get any support from its creators.
+> This project was entirely created by LLMs and should not be used as a production-ready application. Please do not expect support or maintenance from its creators.
 > 
-> As my necessity to have a more functional player locally grew, I began using Claude and Gemini models to implement stuff.
-> I actually liked the outcome, which is why this is now being shared with others, even though I take no credit other than the prompts used to create it.
+> As my need for a more functional local terminal player grew, I began using Claude and Gemini models to implement the features I wanted. I've been really happy with the outcome, which is why I'm sharing this with others. I claim no credit for this code other than drafting the prompts used to generate it!
 
 
 ## Features
