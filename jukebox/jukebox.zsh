@@ -121,6 +121,7 @@ jukebox() {
     local mpvsock="/tmp/jukebox-mpv-$$.sock"
     local coverfile="/tmp/jukebox-cover-$$.jpg"
     local queuefile="/tmp/jukebox-queue-$$.txt"
+    local cachefile="/tmp/jukebox-meta-$$.tsv"
     local _jukebox_art_text=""
 
     : > "$queuefile"  # create empty tracker for manually queued songs
@@ -135,7 +136,7 @@ jukebox() {
             kill "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        rm -f "$playlist" "$mpvsock" "$coverfile" "$queuefile"
+        rm -f "$playlist" "$mpvsock" "$coverfile" "$queuefile" "$cachefile"
     }
     trap _jukebox_cleanup EXIT INT TERM
 
@@ -156,6 +157,33 @@ jukebox() {
         echo "Error: mpv failed to start"
         return 1
     fi
+
+    # --- build metadata cache in background for sorting ---
+    python3 -c "
+import subprocess, json, os, sys
+musicdir = sys.argv[1]
+out = open(sys.argv[2], 'w')
+for root, dirs, files in os.walk(musicdir):
+    for f in sorted(files):
+        if not f.lower().endswith('.flac'): continue
+        fp = os.path.join(root, f)
+        try:
+            r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
+                               capture_output=True, text=True, timeout=10)
+            d = json.loads(r.stdout)
+            tags = d.get('format',{}).get('tags',{})
+            # FLAC tags can be uppercase or lowercase
+            get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+            title = get('title') or f.replace('.flac','')
+            artist = get('artist') or 'Unknown'
+            album = get('album') or 'Unknown'
+            date = get('date') or '0'
+            dur = d.get('format',{}).get('duration','0')
+            out.write(f'{fp}\\t{title}\\t{artist}\\t{album}\\t{date}\\t{dur}\\n')
+        except: pass
+out.close()
+" "$musicdir" "$cachefile" &
+    local _cache_pid=$!
 
     # --- IPC helper using python for reliable Unix socket communication ---
     _jukebox_ipc() {
@@ -362,21 +390,76 @@ except: pass
         printf '\e[?1049l\e[?25h'
         stty sane 2>/dev/null
 
-        # fetch all flac files under musicdir (sorted)
-        local all_files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+        # wait for metadata cache if still building
+        if [[ -n "$_cache_pid" ]] && kill -0 "$_cache_pid" 2>/dev/null; then
+            echo "⏳ Building music library metadata cache..."
+            wait "$_cache_pid" 2>/dev/null
+        fi
+
+        local sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
+        export _JUKEBOX_CACHE="$cachefile"
+
+        # --- sort helper scripts for fzf reload ---
+        cat > "$sort_dir/by_title.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$sort_dir/by_artist.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k3,3 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$sort_dir/by_album.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k4,4 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$sort_dir/by_date.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k5 -rn "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$sort_dir/by_length.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k6 -n "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        chmod +x "$sort_dir"/*.sh
+
+        local fzf_header="TAB=toggle  ENTER=add to queue  ESC=cancel"
+        local fzf_binds=()
+
+        if [[ -s "$cachefile" ]]; then
+            fzf_header="$fzf_header
+─── Sort: Alt-T=title  Alt-A=artist  Alt-B=album  Alt-D=date  Alt-L=length ───"
+            fzf_binds=(
+                --bind "alt-t:reload($sort_dir/by_title.sh)"
+                --bind "alt-a:reload($sort_dir/by_artist.sh)"
+                --bind "alt-b:reload($sort_dir/by_album.sh)"
+                --bind "alt-d:reload($sort_dir/by_date.sh)"
+                --bind "alt-l:reload($sort_dir/by_length.sh)"
+            )
+        fi
+
+        # default list: sorted by title if cache ready, else by filename
+        local input_list
+        if [[ -s "$cachefile" ]]; then
+            input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
+        else
+            input_list=$(find "$musicdir" -name '*.flac' -type f | sort)
+        fi
 
         local selected
-        selected=$(printf '%s\n' "${all_files[@]}" | \
+        selected=$(echo "$input_list" | \
             fzf --multi \
                 --prompt="Add Next: " \
-                --header="TAB=toggle  ENTER=add to queue  ESC=cancel" \
+                --header="$fzf_header" \
                 --marker="✔ " \
                 --preview "$_jukebox_fzf_preview" \
-                --preview-window=right:50%)
+                --preview-window=right:50% \
+                "${fzf_binds[@]}")
 
         # re-enter altscreen
         printf '\e[?1049h'
         stty -echo -icanon min 0 time 0 2>/dev/null
+
+        rm -rf "$sort_dir"
 
         [[ -z "$selected" ]] && return
 
@@ -389,21 +472,14 @@ except: pass
 
         # Append each file, then move it to the target position
         for f in "${files_to_add[@]}"; do
-            # Add to end of queue
             _jukebox_set '{"command":["loadfile","'"$f"'","append"]}'
-            sleep 0.1 # let mpv register the file in the playlist
-
-            # Get new length
+            sleep 0.1
             local pl_len=$(_jukebox_fast_get "playlist-count")
             local last_idx=$((pl_len - 1))
-
-            # Move from end to target pos if not already there
             if (( last_idx > target_pos )); then
                 _jukebox_set '{"command":["playlist-move",'$last_idx','$target_pos']}'
             fi
             target_pos=$((target_pos + 1))
-
-            # Track this file as manually queued
             echo "$f" >> "$queuefile"
         done
     }
@@ -417,54 +493,74 @@ except: pass
         local fetch_script="$script_dir/fetch.sh"
         local del_script="$script_dir/del.sh"
 
-        # fetch script: shows two sections — Queue (manually added) and Next from Library
+        # fetch script: shows NOW PLAYING, then QUEUE section, then LIBRARY section
         cat << 'FETCHEOF' > "$fetch_script"
 #!/usr/bin/env bash
 pl_json=$(echo '{"command":["get_property","playlist"]}' | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null)
 count=$(echo "$pl_json" | jq -r '.data | length // 0' 2>/dev/null)
 (( count == 0 )) && exit 0
 
-# Load manually queued filenames into an associative array
-declare -A queued
-if [[ -f "$_JUKEBOX_QUEUEFILE" ]]; then
-    while IFS= read -r qf; do
-        [[ -n "$qf" ]] && queued["$qf"]=1
-    done < "$_JUKEBOX_QUEUEFILE"
+# Find current position
+cur_pos=$(echo "$pl_json" | jq -r '[.data | to_entries[] | select(.value.current == true) | .key] | .[0] // 0' 2>/dev/null)
+
+# Parse all entries
+entries=$(echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)"' 2>/dev/null)
+
+# --- Now Playing ---
+while IFS=$'\t' read -r is_current idx fp; do
+    if [[ "$is_current" == "true" ]]; then
+        name="${fp##*/}"; name="${name%.flac}"
+        echo "▶ $((idx + 1))) $name"
+    fi
+done <<< "$entries"
+
+# --- Queue section (manually added songs) ---
+queue_output=""
+queue_count=0
+while IFS=$'\t' read -r is_current idx fp; do
+    if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
+        if [[ -f "$_JUKEBOX_QUEUEFILE" ]] && grep -qxF "$fp" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
+            name="${fp##*/}"; name="${name%.flac}"
+            queue_output+="♫ $((idx + 1))) $name"$'\n'
+            queue_count=$((queue_count + 1))
+        fi
+    fi
+done <<< "$entries"
+
+if (( queue_count > 0 )); then
+    echo "━━━━━━━━━━━━ Queue ($queue_count) ━━━━━━━━━━━━"
+    printf '%s' "$queue_output"
 fi
 
-# Find current position
-cur_pos=$(echo "$pl_json" | jq -r '.data | to_entries[] | select(.value.current == true) | .key' 2>/dev/null)
-[[ -z "$cur_pos" ]] && cur_pos=0
-
-echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)"' 2>/dev/null | {
-    while IFS=$'\t' read -r is_current idx fp; do
-        name="${fp##*/}"; name="${name%.flac}"
-
-        if [[ "$is_current" == "true" ]]; then
-            echo "▶ $((idx + 1))) $name"
-        elif (( idx > cur_pos )); then
-            if [[ -n "${queued[$fp]}" ]]; then
-                echo "♫ $((idx + 1))) $name"
-            else
-                echo "  $((idx + 1))) $name"
-            fi
-        else
-            echo "  $((idx + 1))) $name"
+# --- Library section (original playlist) ---
+library_output=""
+library_count=0
+while IFS=$'\t' read -r is_current idx fp; do
+    if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
+        if ! [[ -f "$_JUKEBOX_QUEUEFILE" ]] || ! grep -qxF "$fp" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
+            name="${fp##*/}"; name="${name%.flac}"
+            library_output+="  $((idx + 1))) $name"$'\n'
+            library_count=$((library_count + 1))
         fi
-    done
-}
+    fi
+done <<< "$entries"
+
+if (( library_count > 0 )); then
+    echo "━━━━━━━━ Up Next from Library ($library_count) ━━━━━━━━"
+    printf '%s' "$library_output"
+fi
 FETCHEOF
 
         # delete script: removes from mpv playlist AND from queue tracker
         cat << 'DELEOF' > "$del_script"
 #!/usr/bin/env bash
+# Skip separator lines
+echo "$1" | grep -qE '^[━]' && exit 0
 num=$(echo "$1" | grep -o -E '[0-9]+' | head -n 1)
 if [[ -n "$num" ]]; then
     idx=$((num - 1))
-    # Get the filename before removing so we can clean up the queue tracker
     fp=$(echo "{\"command\":[\"get_property\",\"playlist/$idx/filename\"]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null | jq -r '.data // empty' 2>/dev/null)
     echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" > /dev/null 2>&1
-    # Remove from queue tracker (first matching line only)
     if [[ -n "$fp" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
         tmp=$(mktemp)
         found=0
@@ -488,8 +584,9 @@ DELEOF
         local result
         result=$("$fetch_script" | fzf \
             --prompt='Queue: ' \
-            --header=$'Now playing: ▶  |  Queued: ♫  |  Library: (no marker)\nENTER = Jump to song  |  DEL = Remove  |  ESC = Cancel' \
-            --bind "delete:execute-silent($del_script {})+reload($fetch_script)")
+            --header=$'ENTER = Jump to song  |  DEL = Remove  |  ESC = Cancel' \
+            --bind "delete:execute-silent($del_script {})+reload($fetch_script)" \
+            --no-sort)
 
         # re-enter altscreen
         printf '\e[?1049h'
@@ -497,9 +594,9 @@ DELEOF
 
         rm -rf "$script_dir"
 
-        if [[ -n "$result" ]]; then
-            local num=${result##*▶ }
-            num=${result%%)*}
+        # jump to selected song (ignore separator lines)
+        if [[ -n "$result" ]] && ! echo "$result" | grep -qE '^[━]'; then
+            local num=${result%%)*}
             num=${num##* }
             num=${num//[^0-9]/}
             if [[ -n "$num" ]]; then
