@@ -19,15 +19,16 @@
 
 # --- fzf preview script (metadata + album art) ---
 _jukebox_fzf_preview='
-    tmpcover=$(mktemp /tmp/jukebox-prev-XXXXXX.jpg)
-    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 {} 2>/dev/null)
-    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 {} 2>/dev/null)
-    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 {} 2>/dev/null)
-    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 {} 2>/dev/null)
+    tmpcover="$_JUKEBOX_PREVTMP"
+    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- {} 2>/dev/null)
+    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- {} 2>/dev/null)
+    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- {} 2>/dev/null)
+    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 -- {} 2>/dev/null)
     if [[ -n "$duration" ]]; then
-        mins=$(printf "%.0f" "$(echo "$duration / 60" | bc -l 2>/dev/null)")
-        secs=$(printf "%02.0f" "$(echo "$duration - $mins * 60" | bc -l 2>/dev/null)")
-        dur_fmt="${mins}:${secs}"
+        dur_int=${duration%.*}
+        mins=$((dur_int / 60))
+        secs=$((dur_int % 60))
+        dur_fmt=$(printf "%d:%02d" "$mins" "$secs")
     fi
     fname={}; fname=${fname##*/}; fname=${fname%.flac}
     echo "🎵 ${title:-$fname}"
@@ -38,7 +39,6 @@ _jukebox_fzf_preview='
     if ffmpeg -y -v quiet -i {} -an -vcodec copy -update 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
         chafa --size 40x20 "$tmpcover" 2>/dev/null
     fi
-    rm -f "$tmpcover"
 '
 
 # --- main function ---
@@ -60,13 +60,13 @@ jukebox() {
     read "choice?Choose [1-8, q]: "
 
     case "$choice" in
-        1) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f)}") ;;
-        2) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}") ;;
-        3) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort -r)}") ;;
-        4) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f -printf '%T@\t%p\n' | sort -n | cut -f2-)}") ;;
-        5) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f -printf '%T@\t%p\n' | sort -rn | cut -f2-)}") ;;
+        1) files=("$musicdir"/**/*.flac(N.)) ;;
+        2) files=("$musicdir"/**/*.flac(N.on)) ;;
+        3) files=("$musicdir"/**/*.flac(N.On)) ;;
+        4) files=("$musicdir"/**/*.flac(N.Om)) ;;
+        5) files=("$musicdir"/**/*.flac(N.om)) ;;
         6)
-            files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+            files=("$musicdir"/**/*.flac(N.on))
             if [[ ${#files[@]} -eq 0 ]]; then
                 echo "No FLAC files found in $musicdir"
                 return 1
@@ -80,9 +80,19 @@ jukebox() {
                 [[ "${files[$i]}" == "$picked" ]] && { start_idx=$((i - 1)); break; }
             done
             ;;
-        7) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | shuf)}") ;;
+        7)
+            local -a _tmp=("$musicdir"/**/*.flac(N.))
+            local i j tmp_val
+            for ((i=${#_tmp[@]}; i>1; i--)); do
+                j=$((RANDOM % i + 1))
+                tmp_val="${_tmp[$i]}"
+                _tmp[$i]="${_tmp[$j]}"
+                _tmp[$j]="$tmp_val"
+            done
+            files=("${_tmp[@]}")
+            ;;
         8)
-            local all_files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+            local all_files=("$musicdir"/**/*.flac(N.on))
             if [[ ${#all_files[@]} -eq 0 ]]; then
                 echo "No FLAC files found in $musicdir"
                 return 1
@@ -118,23 +128,30 @@ jukebox() {
 
     # temp files
     local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
-    local mpvsock="/tmp/jukebox-mpv-$$.sock"
-    local coverfile="/tmp/jukebox-cover-$$.jpg"
+    local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
+    local coverfile=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
+    local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
+    export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     local _jukebox_art_text=""
+    local saved_stty=$(stty -g 2>/dev/null)
 
     printf '%s\n' "${files[@]}" > "$playlist"
 
     # cleanup handler
     _jukebox_cleanup() {
         printf '\e[?1049l\e[?25h'
-        stty sane 2>/dev/null
+        [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
         if [[ -n "$_jukebox_mpv_pid" ]] && kill -0 "$_jukebox_mpv_pid" 2>/dev/null; then
             kill "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        rm -f "$playlist" "$mpvsock" "$coverfile"
+        rm -f "$playlist" "$mpvsock" "$coverfile" "$_jukebox_prevtmp"
+        unfunction _jukebox_render _jukebox_ipc _jukebox_get _jukebox_get_num \
+                   _jukebox_set _jukebox_extract_art _jukebox_cache_art \
+                   _jukebox_center _jukebox_padline _jukebox_fast_get \
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_cleanup 2>/dev/null
     }
-    trap _jukebox_cleanup EXIT INT TERM
+    trap _jukebox_cleanup INT TERM RETURN
 
     # start mpv in background with IPC socket, fully headless
     mpv --no-video --no-terminal \
@@ -156,42 +173,45 @@ jukebox() {
 
     # --- IPC helper using python for reliable Unix socket communication ---
     _jukebox_ipc() {
-        python3 -c "
+        python3 -c '
 import socket, json, sys, random
 try:
+    sock_path = sys.argv[2]
     rid = random.randint(1, 999999)
     cmd = json.loads(sys.argv[1])
-    cmd['request_id'] = rid
+    cmd["request_id"] = rid
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(2)
-    s.connect('$mpvsock')
-    s.sendall((json.dumps(cmd) + '\n').encode())
-    buf = b''
+    s.connect(sock_path)
+    s.sendall((json.dumps(cmd) + "\n").encode())
+    buf = b""
     while True:
         c = s.recv(4096)
         if not c: break
         buf += c
-        while b'\n' in buf:
-            line, buf = buf.split(b'\n', 1)
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
             obj = json.loads(line)
-            if obj.get('request_id') == rid:
+            if obj.get("request_id") == rid:
                 s.close()
                 print(json.dumps(obj))
                 sys.exit(0)
     s.close()
-except: pass
-" "$1" 2>/dev/null
+except Exception: pass
+' "$1" "$mpvsock" 2>/dev/null
     }
 
     _jukebox_get() {
-        local resp
-        resp=$(_jukebox_ipc '{"command":["get_property","'"$1"'"]}')
+        local resp cmd
+        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // empty' 2>/dev/null
     }
 
     _jukebox_get_num() {
-        local resp
-        resp=$(_jukebox_ipc '{"command":["get_property","'"$1"'"]}')
+        local resp cmd
+        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // "0"' 2>/dev/null
     }
 
@@ -220,7 +240,7 @@ except: pass
     }
 
     # center helper
-    _center() {
+    _jukebox_center() {
         local text="$1" w="$2"
         local len=${#text}
         if (( len >= w )); then
@@ -232,7 +252,7 @@ except: pass
     }
 
     # pad line to full width (clears leftover chars)
-    _padline() {
+    _jukebox_padline() {
         local text="$1" w="$2"
         local len=${#text}
         if (( len >= w )); then
@@ -242,22 +262,31 @@ except: pass
         fi
     }
 
+    # fast property getter using socat (avoids python overhead for simple queries)
+    _jukebox_fast_get() {
+        local cmd
+        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        echo "$cmd" | socat -t 0.5 - UNIX-CONNECT:"$mpvsock" 2>/dev/null | jq -r '.data // empty' 2>/dev/null
+    }
+
     # --- render screen (absolute positioning for stability) ---
     _jukebox_render() {
         local cols=$(tput cols) rows=$(tput lines)
 
-        local path=$(_jukebox_get "path")
+        local path=$(_jukebox_fast_get "path")
         [[ -z "$path" ]] && return
 
-        local title=$(_jukebox_get "metadata/by-key/title")
+        local title=$(_jukebox_fast_get "metadata/by-key/title")
         [[ -z "$title" ]] && title="${path##*/}" && title="${title%.flac}"
-        local artist=$(_jukebox_get "metadata/by-key/artist")
-        local album=$(_jukebox_get "metadata/by-key/album")
-        local pl_pos=$(_jukebox_get_num "playlist-pos")
-        local pl_count=$(_jukebox_get_num "playlist-count")
-        local pos=$(_jukebox_get_num "time-pos")
-        local dur=$(_jukebox_get_num "duration")
-        local paused=$(_jukebox_get "pause")
+        local artist=$(_jukebox_fast_get "metadata/by-key/artist")
+        local album=$(_jukebox_fast_get "metadata/by-key/album")
+        local pl_pos=$(_jukebox_fast_get "playlist-pos")
+        local pl_count=$(_jukebox_fast_get "playlist-count")
+        local pos=$(_jukebox_fast_get "time-pos")
+        local dur=$(_jukebox_fast_get "duration")
+        pl_pos=${pl_pos:-0}; pl_count=${pl_count:-0}
+        pos=${pos:-0}; dur=${dur:-0}
+        local paused=$(_jukebox_fast_get "pause")
 
         local pos_i=${pos%.*} dur_i=${dur%.*}
         pos_i=${pos_i:-0}; dur_i=${dur_i:-0}
@@ -294,22 +323,22 @@ except: pass
 
         # row 1: controls (dim)
         printf '\e[1;1H\e[2m'
-        _padline "$(_center "$controls" $cols)" $cols
+        _jukebox_padline "$(_jukebox_center "$controls" $cols)" $cols
         printf '\e[0m'
 
         # row 3: song info
         printf '\e[3;1H'
-        _padline "$(_center "$info" $cols)" $cols
+        _jukebox_padline "$(_jukebox_center "$info" $cols)" $cols
 
         # row 4: album (or blank)
         printf '\e[4;1H'
         if [[ -n "$album" ]]; then
-            _padline "$(_center "💿 $album" $cols)" $cols
+            _jukebox_padline "$(_jukebox_center "💿 $album" $cols)" $cols
         fi
 
         # row 5: track position
         printf '\e[5;1H'
-        _padline "$(_center "$track_info" $cols)" $cols
+        _jukebox_padline "$(_jukebox_center "$track_info" $cols)" $cols
 
         # album art (kitty graphics — start at row 7)
         local _art_line_count=0
@@ -347,7 +376,7 @@ except: pass
 
         # progress at bottom
         printf '\e[%d;1H' "$rows"
-        _padline "$(_center "${label}${bar}" $cols)" $cols
+        _jukebox_padline "$(_jukebox_center "${label}${bar}" $cols)" $cols
 
         # restore auto-wrap, show cursor, end sync
         printf '\e[?7h\e[?25h\e[?2026l'
@@ -357,10 +386,10 @@ except: pass
     _jukebox_add_next() {
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
-        stty sane 2>/dev/null
+        [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
         # fetch all flac files under musicdir (sorted)
-        local all_files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+        local all_files=("$musicdir"/**/*.flac(N.on))
 
         local selected
         selected=$(printf '%s\n' "${all_files[@]}" | \
@@ -387,7 +416,9 @@ except: pass
         # Append each file, then move it to the target position
         for f in "${files_to_add[@]}"; do
             # Add to end of queue
-            _jukebox_set '{"command":["loadfile","'"$f"'","append"]}'
+            local cmd
+            cmd=$(jq -n --arg f "$f" '{"command":["loadfile",$f,"append"]}')
+            _jukebox_set "$cmd"
             sleep 0.1 # let mpv register the file in the playlist
 
             # Get new length
@@ -396,7 +427,8 @@ except: pass
 
             # Move from end to target pos if not already there
             if (( last_idx > target_pos )); then
-                _jukebox_set '{"command":["playlist-move",'$last_idx','$target_pos']}'
+                cmd=$(jq -n --argjson last "$last_idx" --argjson tgt "$target_pos" '{"command":["playlist-move",$last,$tgt]}')
+                _jukebox_set "$cmd"
             fi
             target_pos=$((target_pos + 1))
         done
@@ -406,7 +438,6 @@ except: pass
     _jukebox_queue_picker() {
         # function for fzf to reload the queue dynamically
         export _JUKEBOX_SOCK="$mpvsock"
-        export -f _jukebox_fast_get 2>/dev/null || true
         
         # We need a small helper script we can call from fzf, because
         # exporting complex zsh functions to fzf's bash shell is messy.
@@ -441,7 +472,7 @@ EOF
 
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
-        stty sane 2>/dev/null
+        [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
         # Run fzf using the fetch script as the initial input AND the reload command
         local result
@@ -460,12 +491,12 @@ EOF
         rm -rf "$script_dir"
 
         if [[ -n "$result" ]]; then
-            local num=${result##*▶ }
-            num=${result%%)*}
-            num=${num##* }
-            num=${num//[^0-9]/}
+            local num
+            num=$(echo "$result" | grep -oE '[0-9]+' | head -1)
             if [[ -n "$num" ]]; then
-                _jukebox_set '{"command":["set_property","playlist-pos",'$((num - 1))']}'
+                local cmd
+                cmd=$(jq -n --argjson pos "$((num - 1))" '{"command":["set_property","playlist-pos",$pos]}')
+                _jukebox_set "$cmd"
                 sleep 0.3
                 local newpath=$(_jukebox_fast_get "path")
                 if [[ -n "$newpath" ]]; then
@@ -484,7 +515,7 @@ EOF
     sleep 0.5
     local cur_path="" _retries=0
     while [[ -z "$cur_path" ]] && (( _retries < 20 )); do
-        cur_path=$(_jukebox_get "path")
+        cur_path=$(_jukebox_fast_get "path")
         [[ -z "$cur_path" ]] && sleep 0.2
         _retries=$((_retries + 1))
     done
@@ -493,11 +524,6 @@ EOF
         _jukebox_cache_art
     fi
     _jukebox_render
-
-    # fast property getter using socat (avoids python overhead for simple queries)
-    _jukebox_fast_get() {
-        echo "{\"command\":[\"get_property\",\"$1\"]}" | socat -t 0.5 - UNIX-CONNECT:"$mpvsock" 2>/dev/null | jq -r '.data // empty' 2>/dev/null
-    }
 
     # track state for change detection
     local last_path="$cur_path"
@@ -508,7 +534,8 @@ EOF
     # raw terminal mode for keypress reading
     stty -echo -icanon min 0 time 0 2>/dev/null
 
-    # main display loop (runs ~4 times a second for real-time bar)
+    # main display loop
+    local _tick=0
     while kill -0 "$_jukebox_mpv_pid" 2>/dev/null; do
         # 1. Handle Input (non-blocking, fast drain)
         local key=""
@@ -545,6 +572,9 @@ EOF
                     ;;
             esac
         fi
+
+        _tick=$((_tick + 1))
+        if (( _tick % 5 == 0 || force_redraw )); then
 
         # 2. Check for environment changes (resize)
         local new_cols=$(tput cols) new_rows=$(tput lines)
@@ -606,13 +636,15 @@ EOF
                 # Draw ONLY the bottom line
                 # disable auto-wrap, save cursor, move to bottom left, hide cursor
                 printf '\e[?7l\e7\e[%d;1H\e[?25l' "$last_rows"
-                _padline "$(_center "${label}${bar}" $last_cols)" $last_cols
+                _jukebox_padline "$(_jukebox_center "${label}${bar}" $last_cols)" $last_cols
                 # show cursor, restore cursor, restore auto-wrap
                 printf '\e[?25h\e8\e[?7h'
             fi
         fi
 
+        fi  # end of _tick % 5 == 0 || force_redraw
+
         # 5. Sleep for next tick
-        sleep 0.25
+        sleep 0.05
     done
 }
