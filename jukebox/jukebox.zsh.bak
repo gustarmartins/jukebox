@@ -1,0 +1,359 @@
+#!/usr/bin/env zsh
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  🎵 Jukebox — Terminal FLAC Player                             ║
+# ║  A zsh function that plays FLAC files with album art,          ║
+# ║  queue building, fzf browsing, and interactive controls.       ║
+# ║                                                                ║
+# ║  Setup: Add this line to your ~/.zshrc:                        ║
+# ║    source ~/jukebox/jukebox.zsh                                ║
+# ║                                                                ║
+# ║  Configuration (optional, add before the source line):         ║
+# ║    export JUKEBOX_MUSIC_DIR="$HOME/Music"                      ║
+# ║                                                                ║
+# ║  Usage: run `jukebox` in your terminal.                        ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+: ${JUKEBOX_MUSIC_DIR:="$HOME/Music"}
+
+# --- helper: display album art via chafa ---
+_jukebox_show_art() {
+    local file="$1" tmpcover
+    tmpcover=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
+    if ffmpeg -y -v quiet -i "$file" -an -vcodec copy -update 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
+        chafa --size 20x10 "$tmpcover" 2>/dev/null
+    fi
+    rm -f "$tmpcover"
+}
+
+# --- fzf preview script (metadata + album art) ---
+_jukebox_fzf_preview='
+    tmpcover=$(mktemp /tmp/jukebox-prev-XXXXXX.jpg)
+    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 {} 2>/dev/null)
+    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 {} 2>/dev/null)
+    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 {} 2>/dev/null)
+    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 {} 2>/dev/null)
+    if [[ -n "$duration" ]]; then
+        mins=$(printf "%.0f" "$(echo "$duration / 60" | bc -l 2>/dev/null)")
+        secs=$(printf "%02.0f" "$(echo "$duration - $mins * 60" | bc -l 2>/dev/null)")
+        dur_fmt="${mins}:${secs}"
+    fi
+    echo "🎵 ${title:-$(basename {} .flac)}"
+    [[ -n "$artist" ]] && echo "🎤 $artist"
+    [[ -n "$album" ]]  && echo "💿 $album"
+    [[ -n "$dur_fmt" ]] && echo "⏱  $dur_fmt"
+    echo ""
+    if ffmpeg -y -v quiet -i {} -an -vcodec copy -update 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
+        chafa --size 40x20 "$tmpcover" 2>/dev/null
+    fi
+    rm -f "$tmpcover"
+'
+
+# --- main function ---
+jukebox() {
+    local choice files=() start_idx=0
+    local musicdir="${JUKEBOX_MUSIC_DIR}"
+    local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
+    local inputconf=$(mktemp /tmp/jukebox-keys-XXXXXX.conf)
+    local luascript=$(mktemp /tmp/jukebox-art-XXXXXX.lua)
+    trap "rm -f '$playlist' '$inputconf' '$luascript'" EXIT
+
+    echo "🎵 Jukebox - Select playback mode:"
+    echo "  1) Play all (original order)"
+    echo "  2) Sort by filename (A-Z)"
+    echo "  3) Sort by filename (Z-A)"
+    echo "  4) Sort by date (oldest first)"
+    echo "  5) Sort by date (newest first)"
+    echo "  6) Browse & pick (plays from selection onward)"
+    echo "  7) Shuffle"
+    echo "  8) Build queue (TAB to pick, ENTER to play)"
+    echo "  q) Quit"
+    echo ""
+    read "choice?Choose [1-8, q]: "
+
+    case "$choice" in
+        1) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f)}") ;;
+        2) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}") ;;
+        3) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort -r)}") ;;
+        4) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f -printf '%T@\t%p\n' | sort -n | cut -f2-)}") ;;
+        5) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f -printf '%T@\t%p\n' | sort -rn | cut -f2-)}") ;;
+        6)
+            files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+            if [[ ${#files[@]} -eq 0 ]]; then
+                echo "No FLAC files found in $musicdir"
+                return 1
+            fi
+            local picked=$(printf '%s\n' "${files[@]}" | \
+                fzf --prompt="Pick start song: " \
+                    --preview "$_jukebox_fzf_preview" \
+                    --preview-window=right:50%)
+            [[ -z "$picked" ]] && return
+            for i in {1..${#files[@]}}; do
+                [[ "${files[$i]}" == "$picked" ]] && { start_idx=$((i - 1)); break; }
+            done
+            ;;
+        7) files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | shuf)}") ;;
+        8)
+            local all_files=("${(@f)$(find "$musicdir" -name '*.flac' -type f | sort)}")
+            if [[ ${#all_files[@]} -eq 0 ]]; then
+                echo "No FLAC files found in $musicdir"
+                return 1
+            fi
+            local selected
+            selected=$(printf '%s\n' "${all_files[@]}" | \
+                fzf --multi \
+                    --prompt="Queue: " \
+                    --header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play" \
+                    --marker="✔ " \
+                    --preview "$_jukebox_fzf_preview" \
+                    --preview-window=right:50% \
+                    --bind 'ctrl-a:select-all,ctrl-d:deselect-all')
+            [[ -z "$selected" ]] && return
+            files=("${(@f)${selected}}")
+            echo ""
+            echo "📋 Queue (${#files[@]} songs):"
+            local n=1
+            for f in "${files[@]}"; do
+                echo "  $n) $(basename "$f" .flac)"
+                n=$((n + 1))
+            done
+            ;;
+        q|Q) return ;;
+        *) echo "Invalid choice"; return 1 ;;
+    esac
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "No FLAC files found in $musicdir"
+        return 1
+    fi
+
+    printf '%s\n' "${files[@]}" > "$playlist"
+
+    # keybindings: playlist nav + seeking
+    cat > "$inputconf" <<'MPV_KEYS'
+<     playlist-prev
+>     playlist-next
+,     playlist-prev
+.     playlist-next
+ENTER playlist-next
+LEFT  seek -5
+RIGHT seek  5
+UP    seek  30
+DOWN  seek -30
+[     add speed -0.25
+]     add speed  0.25
+BS    set speed 1.0
+L     script-message show-queue
+l     script-message show-queue
+=     ignore
+;     ignore
+K     ignore
+Alt+_ ignore
+Alt+\ ignore
+MPV_KEYS
+
+    # Lua script: full terminal display engine + queue picker
+    cat > "$luascript" <<'LUA_SCRIPT'
+local tty = io.open("/dev/tty", "w")
+if not tty then tty = io.stdout end
+
+local art_lines = 0  -- lines used by last display
+
+local function tty_write(s)
+    tty:write(s)
+    tty:flush()
+end
+
+local function get_term_size()
+    local h = io.popen("tput lines 2>/dev/tty")
+    local w = io.popen("tput cols 2>/dev/tty")
+    local rows = h and tonumber(h:read("*l")) or 24
+    local cols = w and tonumber(w:read("*l")) or 80
+    if h then h:close() end
+    if w then w:close() end
+    return rows, cols
+end
+
+local function center(text, width)
+    local len = #text
+    if len >= width then return text end
+    local pad = math.floor((width - len) / 2)
+    return string.rep(" ", pad) .. text
+end
+
+local function fmt_time(seconds)
+    if not seconds or seconds < 0 then return "00:00" end
+    local m = math.floor(seconds / 60)
+    local s = math.floor(seconds % 60)
+    return string.format("%02d:%02d", m, s)
+end
+
+local function make_bar(pos, dur, width)
+    if not pos or not dur or dur <= 0 then return "" end
+    local bw = width - 2  -- for [ and ]
+    if bw < 5 then return "" end
+    local filled = math.floor((pos / dur) * bw)
+    if filled > bw then filled = bw end
+    return "[" .. string.rep("━", filled) .. string.rep("─", bw - filled) .. "]"
+end
+
+function show_cover()
+    local path = mp.get_property("path")
+    if not path then return end
+
+    local rows, cols = get_term_size()
+    -- art height: ~40% of terminal height, width: proportional
+    local art_h = math.max(8, math.floor(rows * 0.4))
+    local art_w = art_h * 2  -- chafa chars are ~2:1 aspect
+    if art_w > cols - 4 then art_w = cols - 4 end
+    local art_size = art_w .. "x" .. art_h
+
+    local spath = "'" .. path:gsub("'", "'\\''") .. "'"
+    local tmpcover = "/tmp/jukebox-nowplaying.jpg"
+    os.execute("ffmpeg -y -v quiet -i " .. spath .. " -an -vcodec copy -update 1 " .. tmpcover .. " 2>/dev/null")
+
+    local title = mp.get_property("metadata/by-key/title") or path:match("([^/]+)%.%w+$") or "Unknown"
+    local artist = mp.get_property("metadata/by-key/artist") or ""
+    local album = mp.get_property("metadata/by-key/album") or ""
+    local pl_pos = (mp.get_property_number("playlist-pos", 0) or 0) + 1
+    local pl_count = mp.get_property_number("playlist-count", 0) or 0
+
+    -- clear previous display: move up art_lines and clear each
+    if art_lines > 0 then
+        tty_write("\27[" .. art_lines .. "A")
+        for i = 1, art_lines do
+            tty_write("\27[2K\n")
+        end
+        tty_write("\27[" .. art_lines .. "A")
+    end
+
+    local output = {}
+    table.insert(output, "")
+
+    -- song info centered
+    local info = "♫  " .. title
+    if artist ~= "" then info = info .. "  —  " .. artist end
+    table.insert(output, center(info, cols))
+
+    if album ~= "" then
+        table.insert(output, center("💿 " .. album, cols))
+    end
+
+    table.insert(output, center(string.format("[%d / %d]", pl_pos, pl_count), cols))
+    table.insert(output, "")
+
+    -- render art to string via pipe
+    local has_art = false
+    local coverf = io.open(tmpcover, "r")
+    if coverf then
+        local sz = coverf:seek("end")
+        coverf:close()
+        if sz > 0 then
+            local pipe = io.popen("chafa --size " .. art_size .. " --align mid " .. tmpcover .. " 2>/dev/null")
+            if pipe then
+                local art = pipe:read("*a")
+                pipe:close()
+                if art and #art > 0 then
+                    table.insert(output, art)
+                    has_art = true
+                end
+            end
+        end
+    end
+    os.remove(tmpcover)
+
+    table.insert(output, "")
+
+    local full = table.concat(output, "\n")
+    tty_write(full)
+
+    -- count lines for next clear
+    art_lines = 0
+    for _ in full:gmatch("\n") do art_lines = art_lines + 1 end
+    art_lines = art_lines + 1
+end
+
+-- live progress bar updated every second
+local progress_drawn = false
+local function update_progress()
+    local pos = mp.get_property_number("time-pos")
+    local dur = mp.get_property_number("duration")
+    local paused = mp.get_property_bool("pause", false)
+    if not pos or not dur then return end
+
+    local _, cols = get_term_size()
+    local time_str = fmt_time(pos) .. " / " .. fmt_time(dur)
+    local icon = paused and "⏸ " or "▶ "
+    local label = icon .. time_str
+    local bar_w = cols - #label - 3
+    local bar = ""
+    if bar_w > 10 then
+        bar = " " .. make_bar(pos, dur, bar_w)
+    end
+    local line = center(label .. bar, cols)
+
+    -- save cursor, move to progress line, write, restore
+    if progress_drawn then
+        tty_write("\27[s\27[1A\27[2K\r" .. line .. "\27[u")
+    else
+        tty_write(line .. "\n")
+        progress_drawn = true
+    end
+end
+
+function on_file_loaded()
+    progress_drawn = false
+    show_cover()
+    -- small delay then draw first progress
+    mp.add_timeout(0.3, update_progress)
+end
+
+function show_queue()
+    local count = mp.get_property_number("playlist-count", 0)
+    if count == 0 then return end
+    local pos = mp.get_property_number("playlist-pos", 0)
+
+    local tmplist = "/tmp/jukebox-queue.txt"
+    local f = io.open(tmplist, "w")
+    if not f then return end
+    for i = 0, count - 1 do
+        local filepath = mp.get_property("playlist/" .. i .. "/filename")
+        local name = filepath and filepath:match("([^/]+)%.%w+$") or ("Track " .. (i + 1))
+        local marker = (i == pos) and "▶ " or "  "
+        f:write(string.format("%s%d) %s\n", marker, i + 1, name))
+    end
+    f:close()
+
+    local pick = io.popen("fzf --prompt='Jump to: ' --header='Current: ▶' --ansi < " .. tmplist .. " 2>/dev/tty")
+    if not pick then os.remove(tmplist); return end
+    local result = pick:read("*l")
+    pick:close()
+    os.remove(tmplist)
+
+    if result then
+        local num = result:match("(%d+)%)")
+        if num then
+            mp.set_property_number("playlist-pos", tonumber(num) - 1)
+        end
+    end
+end
+
+mp.register_event("file-loaded", on_file_loaded)
+mp.observe_property("time-pos", "number", update_progress)
+mp.observe_property("pause", "bool", update_progress)
+mp.register_script_message("show-queue", show_queue)
+LUA_SCRIPT
+
+    echo ""
+    echo "▶ Playing ${#files[@]} songs (starting at #$((start_idx + 1)))..."
+    echo "Controls: SPACE=pause  ←→=seek 5s  ↑↓=seek 30s  ,./<>=prev/next  L=queue  q=quit"
+    echo ""
+
+    mpv --no-video \
+        --playlist="$playlist" \
+        --playlist-start="$start_idx" \
+        --input-conf="$inputconf" \
+        --input-default-bindings=no \
+        --really-quiet \
+        --term-osd=no \
+        --script="$luascript"
+}
