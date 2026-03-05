@@ -120,7 +120,10 @@ jukebox() {
     local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
     local mpvsock="/tmp/jukebox-mpv-$$.sock"
     local coverfile="/tmp/jukebox-cover-$$.jpg"
+    local queuefile="/tmp/jukebox-queue-$$.txt"
     local _jukebox_art_text=""
+
+    : > "$queuefile"  # create empty tracker for manually queued songs
 
     printf '%s\n' "${files[@]}" > "$playlist"
 
@@ -132,7 +135,7 @@ jukebox() {
             kill "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        rm -f "$playlist" "$mpvsock" "$coverfile"
+        rm -f "$playlist" "$mpvsock" "$coverfile" "$queuefile"
     }
     trap _jukebox_cleanup EXIT INT TERM
 
@@ -399,59 +402,94 @@ except: pass
                 _jukebox_set '{"command":["playlist-move",'$last_idx','$target_pos']}'
             fi
             target_pos=$((target_pos + 1))
+
+            # Track this file as manually queued
+            echo "$f" >> "$queuefile"
         done
     }
 
     # --- queue picker & editor ---
     _jukebox_queue_picker() {
-        # function for fzf to reload the queue dynamically
         export _JUKEBOX_SOCK="$mpvsock"
-        export -f _jukebox_fast_get 2>/dev/null || true
-        
-        # We need a small helper script we can call from fzf, because
-        # exporting complex zsh functions to fzf's bash shell is messy.
+        export _JUKEBOX_QUEUEFILE="$queuefile"
+
         local script_dir=$(mktemp -d /tmp/jukebox-scripts-XXXXXX)
         local fetch_script="$script_dir/fetch.sh"
         local del_script="$script_dir/del.sh"
 
-        cat << 'EOF' > "$fetch_script"
+        # fetch script: shows two sections — Queue (manually added) and Next from Library
+        cat << 'FETCHEOF' > "$fetch_script"
 #!/usr/bin/env bash
 pl_json=$(echo '{"command":["get_property","playlist"]}' | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null)
 count=$(echo "$pl_json" | jq -r '.data | length // 0' 2>/dev/null)
 (( count == 0 )) && exit 0
+
+# Load manually queued filenames into an associative array
+declare -A queued
+if [[ -f "$_JUKEBOX_QUEUEFILE" ]]; then
+    while IFS= read -r qf; do
+        [[ -n "$qf" ]] && queued["$qf"]=1
+    done < "$_JUKEBOX_QUEUEFILE"
+fi
+
+# Find current position
+cur_pos=$(echo "$pl_json" | jq -r '.data | to_entries[] | select(.value.current == true) | .key' 2>/dev/null)
+[[ -z "$cur_pos" ]] && cur_pos=0
+
 echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)"' 2>/dev/null | {
     while IFS=$'\t' read -r is_current idx fp; do
         name="${fp##*/}"; name="${name%.flac}"
-        marker="  "
-        [[ "$is_current" == "true" ]] && marker="▶ "
-        echo "${marker}$((idx + 1))) $name"
+
+        if [[ "$is_current" == "true" ]]; then
+            echo "▶ $((idx + 1))) $name"
+        elif (( idx > cur_pos )); then
+            if [[ -n "${queued[$fp]}" ]]; then
+                echo "♫ $((idx + 1))) $name"
+            else
+                echo "  $((idx + 1))) $name"
+            fi
+        else
+            echo "  $((idx + 1))) $name"
+        fi
     done
 }
-EOF
-        cat << 'EOF' > "$del_script"
+FETCHEOF
+
+        # delete script: removes from mpv playlist AND from queue tracker
+        cat << 'DELEOF' > "$del_script"
 #!/usr/bin/env bash
-# $1 is the selected line (e.g. "  3) Song Name")
 num=$(echo "$1" | grep -o -E '[0-9]+' | head -n 1)
 if [[ -n "$num" ]]; then
     idx=$((num - 1))
-    echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" >/dev/null 2>&1
+    # Get the filename before removing so we can clean up the queue tracker
+    fp=$(echo "{\"command\":[\"get_property\",\"playlist/$idx/filename\"]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null | jq -r '.data // empty' 2>/dev/null)
+    echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" > /dev/null 2>&1
+    # Remove from queue tracker (first matching line only)
+    if [[ -n "$fp" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
+        tmp=$(mktemp)
+        found=0
+        while IFS= read -r line; do
+            if [[ "$found" -eq 0 && "$line" == "$fp" ]]; then
+                found=1
+            else
+                echo "$line"
+            fi
+        done < "$_JUKEBOX_QUEUEFILE" > "$tmp"
+        mv "$tmp" "$_JUKEBOX_QUEUEFILE"
+    fi
 fi
-EOF
+DELEOF
         chmod +x "$fetch_script" "$del_script"
 
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
         stty sane 2>/dev/null
 
-        # Run fzf using the fetch script as the initial input AND the reload command
         local result
         result=$("$fetch_script" | fzf \
             --prompt='Queue: ' \
-            --header=$'Current: ▶ \nENTER = Jump to song\nDEL = Remove from queue\nESC = Cancel' \
-            --bind "delete:execute-silent($del_script {})" \
-            --bind "delete:+reload($fetch_script)" \
-            --bind "backspace:execute-silent($del_script {})" \
-            --bind "backspace:+reload($fetch_script)")
+            --header=$'Now playing: ▶  |  Queued: ♫  |  Library: (no marker)\nENTER = Jump to song  |  DEL = Remove  |  ESC = Cancel' \
+            --bind "delete:execute-silent($del_script {})+reload($fetch_script)")
 
         # re-enter altscreen
         printf '\e[?1049h'
@@ -529,6 +567,9 @@ EOF
                 'L'|'l')
                     _jukebox_queue_picker
                     force_redraw=1
+                    ;;
+                'q'|'Q')
+                    break
                     ;;
                 $'\e')
                     local seq=""
