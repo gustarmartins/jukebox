@@ -2,6 +2,13 @@
 
 Terminal FLAC Player with Kitty graphics for album art!
 
+> [!IMPORTANT]
+> This project was entirely created by LLMs, and should not be used as a product nor expect to get any support from its creators.
+> 
+> As my necessity to have a more functional player locally grew, I began using Claude and Gemini models to implement stuff.
+> I actually liked the outcome, which is why this is now being shared with others, even though I take no credit other than the prompts used to create it.
+
+
 ## Features
 - Real-time time & progress bar without flickering
 - File browsing & search via `fzf`
