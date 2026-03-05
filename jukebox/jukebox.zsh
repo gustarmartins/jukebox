@@ -234,14 +234,14 @@ except Exception: pass
 
     _jukebox_get() {
         local resp cmd
-        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
         resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // empty' 2>/dev/null
     }
 
     _jukebox_get_num() {
         local resp cmd
-        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
         resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // "0"' 2>/dev/null
     }
@@ -296,7 +296,7 @@ except Exception: pass
     # fast property getter using socat (avoids python overhead for simple queries)
     _jukebox_fast_get() {
         local cmd
-        cmd=$(jq -n --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
         echo "$cmd" | socat -t 0.5 - UNIX-CONNECT:"$mpvsock" 2>/dev/null | jq -r '.data // empty' 2>/dev/null
     }
 
@@ -534,7 +534,7 @@ SORTEOF
         for f in "${files_to_add[@]}"; do
             # Add to end of queue
             local cmd
-            cmd=$(jq -n --arg f "$f" '{"command":["loadfile",$f,"append"]}')
+            cmd=$(jq -nc --arg f "$f" '{"command":["loadfile",$f,"append"]}')
             _jukebox_set "$cmd"
             sleep 0.1 # let mpv register the file in the playlist
             local pl_len=$(_jukebox_fast_get "playlist-count")
@@ -547,7 +547,7 @@ SORTEOF
             fi
 
             if (( last_idx > target_pos )); then
-                cmd=$(jq -n --argjson last "$last_idx" --argjson tgt "$target_pos" '{"command":["playlist-move",$last,$tgt]}')
+                cmd=$(jq -nc --argjson last "$last_idx" --argjson tgt "$target_pos" '{"command":["playlist-move",$last,$tgt]}')
                 _jukebox_set "$cmd"
             fi
             target_pos=$((target_pos + 1))
@@ -672,7 +672,7 @@ DELEOF
             num=$(echo "$result" | grep -oE '[0-9]+' | head -1)
             if [[ -n "$num" ]]; then
                 local cmd
-                cmd=$(jq -n --argjson pos "$((num - 1))" '{"command":["set_property","playlist-pos",$pos]}')
+                cmd=$(jq -nc --argjson pos "$((num - 1))" '{"command":["set_property","playlist-pos",$pos]}')
                 _jukebox_set "$cmd"
                 sleep 0.3
                 local newpath=$(_jukebox_fast_get "path")
