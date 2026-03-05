@@ -404,22 +404,47 @@ except: pass
 #!/usr/bin/env bash
 sort -t$'\t' -k2 -f "$_JUKEBOX_CACHE" | cut -f1
 SORTEOF
+        cat > "$sort_dir/by_title_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k2 -fr "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+
         cat > "$sort_dir/by_artist.sh" << 'SORTEOF'
 #!/usr/bin/env bash
 sort -t$'\t' -k3,3 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
 SORTEOF
+        cat > "$sort_dir/by_artist_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k3,3 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+
         cat > "$sort_dir/by_album.sh" << 'SORTEOF'
 #!/usr/bin/env bash
 sort -t$'\t' -k4,4 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
 SORTEOF
+        cat > "$sort_dir/by_album_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k4,4 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+
         cat > "$sort_dir/by_date.sh" << 'SORTEOF'
 #!/usr/bin/env bash
 sort -t$'\t' -k5 -rn "$_JUKEBOX_CACHE" | cut -f1
 SORTEOF
+        cat > "$sort_dir/by_date_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k5 -n "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+
         cat > "$sort_dir/by_length.sh" << 'SORTEOF'
 #!/usr/bin/env bash
 sort -t$'\t' -k6 -n "$_JUKEBOX_CACHE" | cut -f1
 SORTEOF
+        cat > "$sort_dir/by_length_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k6 -nr "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+
         chmod +x "$sort_dir"/*.sh
 
         local fzf_header="TAB=toggle  ENTER=add to queue  ESC=cancel"
@@ -427,13 +452,18 @@ SORTEOF
 
         if [[ -s "$cachefile" ]]; then
             fzf_header="$fzf_header
-─── Sort: Alt-T=title  Alt-A=artist  Alt-B=album  Alt-D=date  Alt-L=length ───"
+─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
             fzf_binds=(
                 --bind "alt-t:reload($sort_dir/by_title.sh)"
+                --bind "alt-T:reload($sort_dir/by_title_rev.sh)"
                 --bind "alt-a:reload($sort_dir/by_artist.sh)"
+                --bind "alt-A:reload($sort_dir/by_artist_rev.sh)"
                 --bind "alt-b:reload($sort_dir/by_album.sh)"
+                --bind "alt-B:reload($sort_dir/by_album_rev.sh)"
                 --bind "alt-d:reload($sort_dir/by_date.sh)"
+                --bind "alt-D:reload($sort_dir/by_date_rev.sh)"
                 --bind "alt-l:reload($sort_dir/by_length.sh)"
+                --bind "alt-L:reload($sort_dir/by_length_rev.sh)"
             )
         fi
 
@@ -476,11 +506,17 @@ SORTEOF
             sleep 0.1
             local pl_len=$(_jukebox_fast_get "playlist-count")
             local last_idx=$((pl_len - 1))
+            
+            # Extract actual mpv playlist entry id
+            local item_id=$(_jukebox_fast_get "playlist/$last_idx/id")
+            if [[ -n "$item_id" ]]; then
+                echo "$item_id" >> "$queuefile"
+            fi
+
             if (( last_idx > target_pos )); then
                 _jukebox_set '{"command":["playlist-move",'$last_idx','$target_pos']}'
             fi
             target_pos=$((target_pos + 1))
-            echo "$f" >> "$queuefile"
         done
     }
 
@@ -503,11 +539,11 @@ count=$(echo "$pl_json" | jq -r '.data | length // 0' 2>/dev/null)
 # Find current position
 cur_pos=$(echo "$pl_json" | jq -r '[.data | to_entries[] | select(.value.current == true) | .key] | .[0] // 0' 2>/dev/null)
 
-# Parse all entries
-entries=$(echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)"' 2>/dev/null)
+# Parse all entries (include id)
+entries=$(echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)\t\(.value.id // "")"' 2>/dev/null)
 
 # --- Now Playing ---
-while IFS=$'\t' read -r is_current idx fp; do
+while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" == "true" ]]; then
         name="${fp##*/}"; name="${name%.flac}"
         echo "▶ $((idx + 1))) $name"
@@ -517,9 +553,9 @@ done <<< "$entries"
 # --- Queue section (manually added songs) ---
 queue_output=""
 queue_count=0
-while IFS=$'\t' read -r is_current idx fp; do
+while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
-        if [[ -f "$_JUKEBOX_QUEUEFILE" ]] && grep -qxF "$fp" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
+        if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]] && grep -qxF "$item_id" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
             name="${fp##*/}"; name="${name%.flac}"
             queue_output+="♫ $((idx + 1))) $name"$'\n'
             queue_count=$((queue_count + 1))
@@ -535,9 +571,9 @@ fi
 # --- Library section (original playlist) ---
 library_output=""
 library_count=0
-while IFS=$'\t' read -r is_current idx fp; do
+while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
-        if ! [[ -f "$_JUKEBOX_QUEUEFILE" ]] || ! grep -qxF "$fp" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
+        if [[ -z "$item_id" ]] || ! [[ -f "$_JUKEBOX_QUEUEFILE" ]] || ! grep -qxF "$item_id" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
             name="${fp##*/}"; name="${name%.flac}"
             library_output+="  $((idx + 1))) $name"$'\n'
             library_count=$((library_count + 1))
@@ -559,13 +595,13 @@ echo "$1" | grep -qE '^[━]' && exit 0
 num=$(echo "$1" | grep -o -E '[0-9]+' | head -n 1)
 if [[ -n "$num" ]]; then
     idx=$((num - 1))
-    fp=$(echo "{\"command\":[\"get_property\",\"playlist/$idx/filename\"]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null | jq -r '.data // empty' 2>/dev/null)
+    item_id=$(echo "{\"command\":[\"get_property\",\"playlist/$idx/id\"]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null | jq -r '.data // empty' 2>/dev/null)
     echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" > /dev/null 2>&1
-    if [[ -n "$fp" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
+    if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
         tmp=$(mktemp)
         found=0
         while IFS= read -r line; do
-            if [[ "$found" -eq 0 && "$line" == "$fp" ]]; then
+            if [[ "$found" -eq 0 && "$line" == "$item_id" ]]; then
                 found=1
             else
                 echo "$line"
