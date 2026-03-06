@@ -167,7 +167,7 @@ jukebox() {
         fi
         rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
         unfunction _jukebox_render _jukebox_ipc _jukebox_get _jukebox_get_num \
-                   _jukebox_set _jukebox_extract_art _jukebox_cache_art \
+                   _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup 2>/dev/null
     }
@@ -273,6 +273,61 @@ except Exception: pass
         _jukebox_ipc "$1" > /dev/null
     }
 
+    # --- batch property getter: single Python process, single socket connection ---
+    # Usage: _jukebox_batch_get prop1 prop2 ...
+    # Output: tab-separated values for each property
+    _jukebox_batch_get() {
+        python3 -c '
+import socket, json, sys
+try:
+    sock_path = sys.argv[1]
+    props = sys.argv[2:]
+    if not props:
+        sys.exit(0)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sock_path)
+    # Send all requests with unique request_ids
+    for i, prop in enumerate(props):
+        cmd = {"command": ["get_property", prop], "request_id": i + 1}
+        s.sendall((json.dumps(cmd) + "\n").encode())
+    # Collect all responses
+    results = {}
+    buf = b""
+    needed = set(range(1, len(props) + 1))
+    while needed:
+        c = s.recv(4096)
+        if not c:
+            break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                obj = json.loads(line)
+                rid = obj.get("request_id")
+                if rid in needed:
+                    val = obj.get("data")
+                    if val is None:
+                        results[rid] = ""
+                    elif isinstance(val, bool):
+                        results[rid] = "true" if val else "false"
+                    else:
+                        results[rid] = str(val)
+                    needed.discard(rid)
+            except:
+                pass
+    s.close()
+    # Output tab-separated values in request order
+    out = []
+    for i in range(len(props)):
+        out.append(results.get(i + 1, ""))
+    print("\t".join(out))
+except Exception:
+    # Output empty tabs so the caller gets the right number of fields
+    print("\t".join(["" for _ in sys.argv[2:]]))
+' "$mpvsock" "$@" 2>/dev/null
+    }
+
     # --- extract cover art ---
     _jukebox_extract_art() {
         local filepath="$1"
@@ -327,20 +382,18 @@ except Exception: pass
     _jukebox_render() {
         local cols=$(tput cols) rows=$(tput lines)
 
-        local path=$(_jukebox_fast_get "path")
+        # Fetch all display properties in a single IPC call (replaces 9 socat calls)
+        local _batch
+        _batch=$(_jukebox_batch_get path metadata/by-key/title metadata/by-key/artist \
+                    metadata/by-key/album playlist-pos playlist-count time-pos duration pause)
+        local path title artist album pl_pos pl_count pos dur paused
+        IFS=$'\t' read -r path title artist album pl_pos pl_count pos dur paused <<< "$_batch"
+
         [[ -z "$path" ]] && return
 
-        local title=$(_jukebox_fast_get "metadata/by-key/title")
         [[ -z "$title" ]] && title="${path##*/}" && title="${title%.flac}"
-        local artist=$(_jukebox_fast_get "metadata/by-key/artist")
-        local album=$(_jukebox_fast_get "metadata/by-key/album")
-        local pl_pos=$(_jukebox_fast_get "playlist-pos")
-        local pl_count=$(_jukebox_fast_get "playlist-count")
-        local pos=$(_jukebox_fast_get "time-pos")
-        local dur=$(_jukebox_fast_get "duration")
         pl_pos=${pl_pos:-0}; pl_count=${pl_count:-0}
         pos=${pos:-0}; dur=${dur:-0}
-        local paused=$(_jukebox_fast_get "pause")
 
         local pos_i=${pos%.*} dur_i=${dur%.*}
         pos_i=${pos_i:-0}; dur_i=${dur_i:-0}
@@ -410,9 +463,11 @@ except Exception: pass
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                # Query specific playlist entry — small response, socat handles it fine
-                local next_file=$(_jukebox_fast_get "playlist/$next_idx/filename")
-                local _next_item_id=$(_jukebox_fast_get "playlist/$next_idx/id")
+                # Fetch next track info in a single IPC call
+                local _next_batch
+                _next_batch=$(_jukebox_batch_get "playlist/$next_idx/filename" "playlist/$next_idx/id")
+                local next_file _next_item_id
+                IFS=$'\t' read -r next_file _next_item_id <<< "$_next_batch"
 
                 _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx next_file=$next_file item_id=$_next_item_id"
                 
@@ -568,8 +623,7 @@ except Exception: pass
                         printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_genre"; q_y=$((q_y + 1))
                     fi
                 else
-                    local _cur_pl_count=$(_jukebox_fast_get "playlist-count")
-                    if [[ -n "$_cur_pl_count" ]] && (( next_idx < _cur_pl_count )); then
+                    if (( next_idx < pl_count )); then
                         printf '\e[%d;%dH\e[2m⏳ Loading...\e[0m' "$q_y" "$queue_x"
                     else
                         printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
@@ -937,9 +991,11 @@ DELEOF
             force_redraw=1
         fi
 
-        # 3. Check for Track/State Changes (Fast poll)
-        local cur_path=$(_jukebox_fast_get "path")
-        local cur_paused=$(_jukebox_fast_get "pause")
+        # 3. Check for Track/State Changes (batch poll — single IPC call)
+        local _poll_batch
+        _poll_batch=$(_jukebox_batch_get path pause playlist-count playlist-pos)
+        local cur_path cur_paused _poll_pl_count _poll_pl_pos
+        IFS=$'\t' read -r cur_path cur_paused _poll_pl_count _poll_pl_pos <<< "$_poll_batch"
 
         if [[ -n "$cur_path" && "$cur_path" != "$last_path" ]]; then
             last_path="$cur_path"
@@ -955,10 +1011,8 @@ DELEOF
 
         # Check if Coming Up Next needs a retry (empty on previous render)
         if [[ -z "$_jukebox_last_next_file" ]]; then
-            local _probe_pl_count=$(_jukebox_fast_get "playlist-count")
-            local _probe_pl_pos=$(_jukebox_fast_get "playlist-pos")
-            if [[ -n "$_probe_pl_count" && -n "$_probe_pl_pos" ]] && (( _probe_pl_pos + 1 < _probe_pl_count )); then
-                _jukebox_log "retry: playlist loaded (count=$_probe_pl_count pos=$_probe_pl_pos), forcing redraw"
+            if [[ -n "$_poll_pl_count" && -n "$_poll_pl_pos" ]] && (( _poll_pl_pos + 1 < _poll_pl_count )); then
+                _jukebox_log "retry: playlist loaded (count=$_poll_pl_count pos=$_poll_pl_pos), forcing redraw"
                 force_redraw=1
             fi
         fi
