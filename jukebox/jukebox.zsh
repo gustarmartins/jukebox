@@ -277,6 +277,7 @@ except Exception: pass
     # Usage: _jukebox_batch_get prop1 prop2 ...
     # Output: tab-separated values for each property
     _jukebox_batch_get() {
+        _jukebox_log "_jukebox_batch_get called with args: $*"
         python3 -c '
 import socket, json, sys
 try:
@@ -302,6 +303,7 @@ try:
         buf += c
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
+            print("MPV RES:", line.decode("utf-8", "replace"), file=sys.stderr)
             try:
                 obj = json.loads(line)
                 rid = obj.get("request_id")
@@ -322,10 +324,11 @@ try:
     for i in range(len(props)):
         out.append(results.get(i + 1, ""))
     print("\x1f".join(out))
-except Exception:
+except Exception as e:
     # Output empty separators so the caller gets the right number of fields
     print("\x1f".join(["" for _ in sys.argv[2:]]))
-' "$mpvsock" "$@" 2>/dev/null
+    print(f"Exception: {e}", file=sys.stderr)
+' "$mpvsock" "$@" 2>>/tmp/jukebox-py.log
     }
 
     # --- extract cover art ---
@@ -463,11 +466,9 @@ except Exception:
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                # Fetch next track info in a single IPC call
-                local _next_batch
-                _next_batch=$(_jukebox_batch_get "playlist/$next_idx/filename" "playlist/$next_idx/id")
-                local next_file _next_item_id
-                IFS=$'\x1f' read -r next_file _next_item_id <<< "$_next_batch"
+                # Query specific playlist entry — small response, socat handles it fine
+                local next_file=$(_jukebox_fast_get "playlist/$next_idx/filename")
+                local _next_item_id=$(_jukebox_fast_get "playlist/$next_idx/id")
 
                 _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx next_file=$next_file item_id=$_next_item_id"
                 
