@@ -147,6 +147,7 @@ jukebox() {
     local queuefile="/tmp/jukebox-queue-$$.txt"
     local cachefile="/tmp/jukebox-meta-$$.tsv"
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
+    local _jukebox_cleaned=""
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
 
@@ -470,9 +471,13 @@ except Exception as e:
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                # Query specific playlist entry — small response, socat handles it fine
-                local next_file=$(_jukebox_fast_get "playlist/$next_idx/filename")
-                local _next_item_id=$(_jukebox_fast_get "playlist/$next_idx/id")
+                # Query playlist array securely without dynamic paths
+                # Extract filename and ID simultaneously from the same JSON doc
+                local _next_info
+                _next_info=$(_jukebox_fast_get "playlist" | jq -r --argjson idx "$next_idx" 'try (.[$idx].filename + "\u001f" + (.[$idx].id | tostring)) catch "\u001f"')
+                
+                local next_file _next_item_id
+                IFS=$'\x1f' read -r next_file _next_item_id <<< "$_next_info"
 
                 _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx next_file=$next_file item_id=$_next_item_id"
                 
