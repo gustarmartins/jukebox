@@ -130,6 +130,7 @@ jukebox() {
     local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
     local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
     local coverfile=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
+    local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
     local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
     local queuefile="/tmp/jukebox-queue-$$.txt"
     local cachefile="/tmp/jukebox-meta-$$.tsv"
@@ -149,13 +150,14 @@ jukebox() {
             kill "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        rm -f "$playlist" "$mpvsock" "$coverfile" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
+        rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
         unfunction _jukebox_render _jukebox_ipc _jukebox_get _jukebox_get_num \
                    _jukebox_set _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_add_next _jukebox_queue_picker _jukebox_cleanup 2>/dev/null
     }
-    trap _jukebox_cleanup INT TERM RETURN
+    setopt localoptions localtraps
+    trap _jukebox_cleanup INT TERM EXIT
 
     # start mpv in background with IPC socket, fully headless
     mpv --no-video --no-terminal \
@@ -234,14 +236,14 @@ except Exception: pass
 
     _jukebox_get() {
         local resp cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
         resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // empty' 2>/dev/null
     }
 
     _jukebox_get_num() {
         local resp cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
         resp=$(_jukebox_ipc "$cmd")
         echo "$resp" | jq -r '.data // "0"' 2>/dev/null
     }
@@ -296,7 +298,7 @@ except Exception: pass
     # fast property getter using socat (avoids python overhead for simple queries)
     _jukebox_fast_get() {
         local cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}')
+        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
         echo "$cmd" | socat -t 0.5 - UNIX-CONNECT:"$mpvsock" 2>/dev/null | jq -r '.data // empty' 2>/dev/null
     }
 
@@ -380,7 +382,6 @@ except Exception: pass
         # upcoming queue on the right (Coming Up Next)
         if [[ -n "$pl_pos" ]]; then
             local pl_json=$(_jukebox_fast_get "playlist")
-            local next_tracks=(${(f)"$(echo "$pl_json" | jq -r --arg pos "$pl_pos" '.data | .[($pos|tonumber)+1 : ($pos|tonumber)+11] | .[]? | .filename | split("/")[-1] | split(".flac")[0]' 2>/dev/null)"})
             
             # calculate safe X position on the right
             local art_w_est=$(( _art_line_count * 2 ))
@@ -389,19 +390,78 @@ except Exception: pass
             (( queue_x < art_w_est + 6 )) && queue_x=$(( art_w_est + 6 ))
             
             if (( queue_x < cols - 15 )); then
+                local next_idx=$((pl_pos + 1))
+                local next_file=$(echo "$pl_json" | jq -r --arg pos "$next_idx" '.[$pos|tonumber]?.filename // empty' 2>/dev/null)
+                
+                if [[ "$next_file" != "$_jukebox_last_next_file" ]]; then
+                    _jukebox_last_next_file="$next_file"
+                    
+                    if [[ -n "$next_file" ]]; then
+                        rm -f "$coverfile_next" 2>/dev/null
+                        ffmpeg -y -v quiet -i "$next_file" -an -vcodec copy -update 1 "$coverfile_next" 2>/dev/null
+                        if [[ -s "$coverfile_next" ]]; then
+                            _jukebox_next_art_text=$(chafa --size 20x10 "$coverfile_next" 2>/dev/null)
+                        else
+                            _jukebox_next_art_text=""
+                        fi
+                        
+                        _jukebox_next_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+                        [[ -z "$_jukebox_next_title" ]] && _jukebox_next_title="${next_file##*/}" && _jukebox_next_title="${_jukebox_next_title%.flac}"
+                        _jukebox_next_artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+                        _jukebox_next_album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+                        
+                        local _ndur=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+                        if [[ -n "$_ndur" ]]; then
+                            local _ndur_i=${_ndur%.*}
+                            _jukebox_next_dur=$(printf "%02d:%02d" $((_ndur_i / 60)) $((_ndur_i % 60)))
+                        else
+                            _jukebox_next_dur=""
+                        fi
+                    else
+                        _jukebox_next_art_text=""
+                        _jukebox_next_title=""
+                        _jukebox_next_artist=""
+                        _jukebox_next_album=""
+                        _jukebox_next_dur=""
+                    fi
+                fi
+                
                 local q_y=7
                 printf '\e[%d;%dH\e[1m🎵 Coming Up Next:\e[0m' "$q_y" "$queue_x"
                 q_y=$((q_y + 2))
                 
-                local max_len=$(( cols - queue_x - 2 ))
-                for tname in "${next_tracks[@]}"; do
-                    [[ -z "$tname" ]] && continue
-                    if (( ${#tname} > max_len )); then
-                        tname="${tname[1,$((max_len - 3))]}..."
+                if [[ -n "$next_file" ]]; then
+                    if [[ -n "$_jukebox_next_art_text" ]]; then
+                        local art_lines=("${(@f)_jukebox_next_art_text}")
+                        for l in "${art_lines[@]}"; do
+                            printf '\e[%d;%dH%s' "$q_y" "$queue_x" "$l"
+                            q_y=$((q_y + 1))
+                        done
                     fi
-                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$tname"
+                    
                     q_y=$((q_y + 1))
-                done
+                    local max_len=$(( cols - queue_x - 2 ))
+                    
+                    local t_title="Title: ${_jukebox_next_title:-Unknown}"
+                    (( ${#t_title} > max_len )) && t_title="${t_title[1,$((max_len - 3))]}..."
+                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_title"; q_y=$((q_y + 1))
+                    
+                    local t_artist="Artist: ${_jukebox_next_artist:-Unknown}"
+                    (( ${#t_artist} > max_len )) && t_artist="${t_artist[1,$((max_len - 3))]}..."
+                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_artist"; q_y=$((q_y + 1))
+                    
+                    local t_album="Album: ${_jukebox_next_album:-None}"
+                    (( ${#t_album} > max_len )) && t_album="${t_album[1,$((max_len - 3))]}..."
+                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_album"; q_y=$((q_y + 1))
+                    
+                    if [[ -n "$_jukebox_next_dur" ]]; then
+                        local t_dur="Length: $_jukebox_next_dur"
+                        (( ${#t_dur} > max_len )) && t_dur="${t_dur[1,$((max_len - 3))]}..."
+                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_dur"; q_y=$((q_y + 1))
+                    fi
+                else
+                    printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
+                fi
             fi
         fi
 
@@ -827,4 +887,5 @@ DELEOF
         # 5. Sleep for next tick
         sleep 0.05
     done
+    _jukebox_cleanup
 }
