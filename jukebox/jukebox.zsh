@@ -417,17 +417,84 @@ except Exception: pass
                         else
                             _jukebox_next_dur=""
                         fi
+
+                        # Audio quality metadata (sample rate, bit depth, channels)
+                        local _nstream=$(ffprobe -v quiet -select_streams a:0 \
+                            -show_entries stream=sample_rate,bits_per_sample,channels \
+                            -of csv=p=0 -- "$next_file" 2>/dev/null)
+                        if [[ -n "$_nstream" ]]; then
+                            local _nsample_rate=${_nstream%%,*}
+                            local _nrest=${_nstream#*,}
+                            local _nbits=${_nrest%%,*}
+                            local _nchannels=${_nrest#*,}
+                            _nchannels=${_nchannels%$'\n'}
+
+                            _jukebox_next_quality="FLAC"
+                            if [[ -n "$_nsample_rate" && "$_nsample_rate" != "N/A" ]]; then
+                                if (( _nsample_rate % 1000 == 0 )); then
+                                    _jukebox_next_quality="$_jukebox_next_quality · $((_nsample_rate / 1000)) kHz"
+                                else
+                                    _jukebox_next_quality="$_jukebox_next_quality · $(awk "BEGIN{printf \"%.1f\", $_nsample_rate/1000}") kHz"
+                                fi
+                            fi
+                            if [[ -n "$_nbits" && "$_nbits" != "0" && "$_nbits" != "N/A" ]]; then
+                                _jukebox_next_quality="$_jukebox_next_quality / ${_nbits}-bit"
+                            fi
+                            if [[ -n "$_nchannels" && "$_nchannels" != "N/A" ]]; then
+                                case "$_nchannels" in
+                                    1) _jukebox_next_quality="$_jukebox_next_quality · Mono" ;;
+                                    2) _jukebox_next_quality="$_jukebox_next_quality · Stereo" ;;
+                                    *) _jukebox_next_quality="$_jukebox_next_quality · ${_nchannels}ch" ;;
+                                esac
+                            fi
+                        else
+                            _jukebox_next_quality=""
+                        fi
+
+                        # File size
+                        local _nsize=$(stat -c %s "$next_file" 2>/dev/null)
+                        if [[ -n "$_nsize" && "$_nsize" != "0" ]]; then
+                            if (( _nsize >= 1073741824 )); then
+                                _jukebox_next_size=$(awk "BEGIN{printf \"%.1f GB\", $_nsize/1073741824}")
+                            elif (( _nsize >= 1048576 )); then
+                                _jukebox_next_size=$(awk "BEGIN{printf \"%.1f MB\", $_nsize/1048576}")
+                            else
+                                _jukebox_next_size=$(awk "BEGIN{printf \"%.0f KB\", $_nsize/1024}")
+                            fi
+                        else
+                            _jukebox_next_size=""
+                        fi
+
+                        # Genre and date tags
+                        _jukebox_next_genre=$(ffprobe -v quiet -show_entries format_tags=genre -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+                        _jukebox_next_date=$(ffprobe -v quiet -show_entries format_tags=date -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
+
+                        # Source detection (queued by user vs library auto-play)
+                        local _next_item_id=$(echo "$pl_json" | jq -r --arg pos "$next_idx" '.[$pos|tonumber]?.id // empty' 2>/dev/null)
+                        if [[ -n "$_next_item_id" && -f "$queuefile" ]] && grep -qxF "$_next_item_id" "$queuefile" 2>/dev/null; then
+                            _jukebox_next_source="queued"
+                        else
+                            _jukebox_next_source="library"
+                        fi
                     else
                         _jukebox_next_art_text=""
                         _jukebox_next_title=""
                         _jukebox_next_artist=""
                         _jukebox_next_album=""
                         _jukebox_next_dur=""
+                        _jukebox_next_quality=""
+                        _jukebox_next_size=""
+                        _jukebox_next_genre=""
+                        _jukebox_next_date=""
+                        _jukebox_next_source=""
                     fi
                 fi
                 
                 local q_y=7
-                printf '\e[%d;%dH\e[1m🎵 Coming Up Next:\e[0m' "$q_y" "$queue_x"
+                local _src_icon=""
+                [[ "$_jukebox_next_source" == "queued" ]] && _src_icon="  📋 Queued"
+                [[ "$_jukebox_next_source" == "library" ]] && _src_icon="  📚 Up Next"
+                printf '\e[%d;%dH\e[1m🎵 Coming Up Next%s\e[0m' "$q_y" "$queue_x" "$_src_icon"
                 q_y=$((q_y + 2))
                 
                 if [[ -n "$next_file" ]]; then
@@ -451,6 +518,7 @@ except Exception: pass
                     printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_artist"; q_y=$((q_y + 1))
                     
                     local t_album="Album: ${_jukebox_next_album:-None}"
+                    [[ -n "$_jukebox_next_date" ]] && t_album="$t_album (${_jukebox_next_date})"
                     (( ${#t_album} > max_len )) && t_album="${t_album[1,$((max_len - 3))]}..."
                     printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_album"; q_y=$((q_y + 1))
                     
@@ -458,6 +526,24 @@ except Exception: pass
                         local t_dur="Length: $_jukebox_next_dur"
                         (( ${#t_dur} > max_len )) && t_dur="${t_dur[1,$((max_len - 3))]}..."
                         printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_dur"; q_y=$((q_y + 1))
+                    fi
+
+                    if [[ -n "$_jukebox_next_quality" ]]; then
+                        local t_quality="Quality: $_jukebox_next_quality"
+                        (( ${#t_quality} > max_len )) && t_quality="${t_quality[1,$((max_len - 3))]}..."
+                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_quality"; q_y=$((q_y + 1))
+                    fi
+
+                    if [[ -n "$_jukebox_next_size" ]]; then
+                        local t_size="Size: $_jukebox_next_size"
+                        (( ${#t_size} > max_len )) && t_size="${t_size[1,$((max_len - 3))]}..."
+                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_size"; q_y=$((q_y + 1))
+                    fi
+
+                    if [[ -n "$_jukebox_next_genre" ]]; then
+                        local t_genre="Genre: $_jukebox_next_genre"
+                        (( ${#t_genre} > max_len )) && t_genre="${t_genre[1,$((max_len - 3))]}..."
+                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_genre"; q_y=$((q_y + 1))
                     fi
                 else
                     printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
