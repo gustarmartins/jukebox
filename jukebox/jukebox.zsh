@@ -383,8 +383,6 @@ except Exception: pass
 
         # upcoming queue on the right (Coming Up Next)
         if [[ -n "$pl_pos" ]]; then
-            local pl_json=$(_jukebox_fast_get "playlist")
-            
             # calculate safe X position on the right
             local art_w_est=$(( _art_line_count * 2 ))
             (( art_w_est == 0 )) && art_w_est=10
@@ -393,7 +391,12 @@ except Exception: pass
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                local next_file=$(echo "$pl_json" | jq -r --arg pos "$next_idx" '.[$pos|tonumber]?.filename // empty' 2>/dev/null)
+                # Extract next filename + item id directly from mpv response in one jq call
+                # Avoids _jukebox_fast_get which pretty-prints the huge playlist array
+                local _pl_cmd=$(jq -nc '{"command":["get_property","playlist"]}' 2>/dev/null)
+                local _pl_raw=$(echo "$_pl_cmd" | socat -t 2 - UNIX-CONNECT:"$mpvsock" 2>/dev/null)
+                local next_file=$(printf '%s' "$_pl_raw" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.filename // empty' 2>/dev/null)
+                local _next_item_id=$(printf '%s' "$_pl_raw" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.id // empty' 2>/dev/null)
                 
                 if [[ "$next_file" != "$_jukebox_last_next_file" ]]; then
                     _jukebox_last_next_file="$next_file"
@@ -472,7 +475,6 @@ except Exception: pass
                         _jukebox_next_date=$(ffprobe -v quiet -show_entries format_tags=date -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
 
                         # Source detection (queued by user vs library auto-play)
-                        local _next_item_id=$(echo "$pl_json" | jq -r --arg pos "$next_idx" '.[$pos|tonumber]?.id // empty' 2>/dev/null)
                         if [[ -n "$_next_item_id" && -f "$queuefile" ]] && grep -qxF "$_next_item_id" "$queuefile" 2>/dev/null; then
                             _jukebox_next_source="queued"
                         else
