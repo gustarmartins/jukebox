@@ -161,6 +161,8 @@ jukebox() {
 
     # start mpv in background with IPC socket, fully headless
     mpv --no-video --no-terminal \
+        --audio-format=s32 \
+        --audio-samplerate=0 \
         --playlist="$playlist" \
         --playlist-start="$start_idx" \
         --input-ipc-server="$mpvsock" &
