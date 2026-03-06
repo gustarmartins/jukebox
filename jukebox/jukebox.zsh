@@ -261,17 +261,13 @@ except Exception: pass
     }
 
     _jukebox_get() {
-        local resp cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
-        resp=$(_jukebox_ipc "$cmd")
-        echo "$resp" | jq -r '.data // empty' 2>/dev/null
+        # Fallback to python batch fetcher for single queries as well
+        _jukebox_batch_get "$1"
     }
-
+    
     _jukebox_get_num() {
-        local resp cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
-        resp=$(_jukebox_ipc "$cmd")
-        echo "$resp" | jq -r '.data // "0"' 2>/dev/null
+        local val=$(_jukebox_batch_get "$1")
+        echo "${val:-0}"
     }
 
     _jukebox_set() {
@@ -379,11 +375,9 @@ except Exception as e:
         fi
     }
 
-    # fast property getter using socat (avoids python overhead for simple queries)
+    # query an individual property fast using python batch fetcher wrapper
     _jukebox_fast_get() {
-        local cmd
-        cmd=$(jq -nc --arg p "$1" '{"command":["get_property",$p]}' 2>/dev/null)
-        echo "$cmd" | socat -t 0.5 - UNIX-CONNECT:"$mpvsock" 2>/dev/null | jq -r '.data // empty' 2>/dev/null
+        _jukebox_batch_get "$1"
     }
 
     # --- render screen (absolute positioning for stability) ---
@@ -473,8 +467,43 @@ except Exception as e:
                 local next_idx=$((pl_pos + 1))
                 # Query playlist array securely without dynamic paths
                 # Extract filename and ID simultaneously from the same JSON doc
+                # Query playlist array securely and directly via Python to bypass jq entirely
                 local _next_info
-                _next_info=$(_jukebox_fast_get "playlist" | jq -r --argjson idx "$next_idx" 'try (.[$idx].filename + "\u001f" + (.[$idx].id | tostring)) catch "\u001f"')
+                _next_info=$(python3 -c '
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sys.argv[1])
+    cmd = {"command": ["get_property", "playlist"], "request_id": 1}
+    s.sendall((json.dumps(cmd) + "\n").encode())
+    
+    pl_data = None
+    buf = b""
+    while pl_data is None:
+        c = s.recv(4096)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            obj = json.loads(line)
+            if obj.get("request_id") == 1:
+                pl_data = obj.get("data", [])
+                break
+                
+    if not pl_data:
+        print("\x1f")
+        sys.exit(0)
+        
+    idx = int(sys.argv[2])
+    if idx < len(pl_data):
+        item = pl_data[idx]
+        print(f"{item.get(\"filename\", \"\")}\x1f{item.get(\"id\", \"\")}")
+    else:
+        print("\x1f")
+except Exception:
+    print("\x1f")
+' "$mpvsock" "$next_idx")
                 
                 local next_file _next_item_id
                 IFS=$'\x1f' read -r next_file _next_item_id <<< "$_next_info"
@@ -771,7 +800,7 @@ SORTEOF
         for f in "${files_to_add[@]}"; do
             # Add to end of queue
             local cmd
-            cmd=$(jq -nc --arg f "$f" '{"command":["loadfile",$f,"append"]}')
+            cmd=$(python3 -c 'import sys, json; print(json.dumps({"command": ["loadfile", sys.argv[1], "append"]}))' "$f")
             _jukebox_set "$cmd"
             sleep 0.1 # let mpv register the file in the playlist
             local pl_len=$(_jukebox_fast_get "playlist-count")
@@ -784,7 +813,7 @@ SORTEOF
             fi
 
             if (( last_idx > target_pos )); then
-                cmd=$(jq -nc --argjson last "$last_idx" --argjson tgt "$target_pos" '{"command":["playlist-move",$last,$tgt]}')
+                    cmd=$(python3 -c 'import sys, json; print(json.dumps({"command": ["playlist-move", int(sys.argv[1]), int(sys.argv[2])]}))' "$last_idx" "$target_pos")
                 _jukebox_set "$cmd"
             fi
             target_pos=$((target_pos + 1))
@@ -806,14 +835,14 @@ SORTEOF
         cat << 'FETCHEOF' > "$fetch_script"
 #!/usr/bin/env bash
 pl_json=$(echo '{"command":["get_property","playlist"]}' | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null)
-count=$(echo "$pl_json" | jq -r '.data | length // 0' 2>/dev/null)
+count=$(echo "$pl_json" | python3 -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print(len(d))' 2>/dev/null)
 (( count == 0 )) && exit 0
 
 # Find current position
-cur_pos=$(echo "$pl_json" | jq -r '[.data | to_entries[] | select(.value.current == true) | .key] | .[0] // 0' 2>/dev/null)
+cur_pos=$(echo "$pl_json" | python3 -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print(next((i for i, x in enumerate(d) if x.get("current")), 0))' 2>/dev/null)
 
 # Parse all entries (include id)
-entries=$(echo "$pl_json" | jq -r '.data | to_entries[] | "\(.value.current // false)\t\(.key)\t\(.value.filename)\t\(.value.id // "")"' 2>/dev/null)
+entries=$(echo "$pl_json" | python3 -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print("\n".join(f"{str(x.get(\"current\", False)).lower()}\t{i}\t{x.get(\"filename\",\"\")}\t{x.get(\"id\",\"\")}" for i, x in enumerate(d)))' 2>/dev/null)
 
 # --- Now Playing ---
 while IFS=$'\t' read -r is_current idx fp item_id; do
@@ -868,7 +897,7 @@ echo "$1" | grep -qE '^[━]' && exit 0
 num=$(echo "$1" | grep -o -E '[0-9]+' | head -n 1)
 if [[ -n "$num" ]]; then
     idx=$((num - 1))
-    item_id=$(echo "{\"command\":[\"get_property\",\"playlist/$idx/id\"]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null | jq -r '.data // empty' 2>/dev/null)
+    item_id=$(python3 -c 'import socket, json, sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall((json.dumps({"command": ["get_property", sys.argv[2]]})+"\n").encode()); d=s.recv(4096).split(b"\n")[0]; print(json.loads(d).get("data", ""))' "$_JUKEBOX_SOCK" "playlist/$idx/id" 2>/dev/null)
     echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" > /dev/null 2>&1
     if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
         tmp=$(mktemp)
@@ -909,7 +938,7 @@ DELEOF
             num=$(echo "$result" | grep -oE '[0-9]+' | head -1)
             if [[ -n "$num" ]]; then
                 local cmd
-                cmd=$(jq -nc --argjson pos "$((num - 1))" '{"command":["set_property","playlist-pos",$pos]}')
+                cmd=$(python3 -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((num - 1))")
                 _jukebox_set "$cmd"
                 sleep 0.3
                 local newpath=$(_jukebox_fast_get "path")
