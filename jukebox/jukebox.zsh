@@ -52,7 +52,7 @@ jukebox() {
     fi
 
     _jukebox_log() {
-        (( _jukebox_debug )) && printf '[%s] %s\n' "$(date +%H:%M:%S.%N | cut -c1-12)" "$*" >> "$_jukebox_debuglog"
+        (( _jukebox_debug )) && printf '[%s] %s\n' "$SECONDS" "$*" >> "$_jukebox_debuglog"
     }
 
     local choice files=() start_idx=0
@@ -410,14 +410,13 @@ except Exception: pass
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                # Use python IPC for playlist (socat is unreliable for large responses)
-                local _pl_resp=$(_jukebox_ipc '{"command":["get_property","playlist"]}')
-                local next_file=$(printf '%s' "$_pl_resp" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.filename // empty' 2>/dev/null)
-                local _next_item_id=$(printf '%s' "$_pl_resp" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.id // empty' 2>/dev/null)
+                # Query specific playlist entry — small response, socat handles it fine
+                local next_file=$(_jukebox_fast_get "playlist/$next_idx/filename")
+                local _next_item_id=$(_jukebox_fast_get "playlist/$next_idx/id")
 
-                _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx resp_len=${#_pl_resp} next_file=$next_file"
+                _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx next_file=$next_file item_id=$_next_item_id"
                 
-                if [[ "$next_file" != "$_jukebox_last_next_file" ]]; then
+                if [[ -n "$next_file" && "$next_file" != "$_jukebox_last_next_file" ]]; then
                     _jukebox_last_next_file="$next_file"
                     
                     if [[ -n "$next_file" ]]; then
@@ -569,7 +568,12 @@ except Exception: pass
                         printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_genre"; q_y=$((q_y + 1))
                     fi
                 else
-                    printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
+                    local _cur_pl_count=$(_jukebox_fast_get "playlist-count")
+                    if [[ -n "$_cur_pl_count" ]] && (( next_idx < _cur_pl_count )); then
+                        printf '\e[%d;%dH\e[2m⏳ Loading...\e[0m' "$q_y" "$queue_x"
+                    else
+                        printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
+                    fi
                 fi
             fi
         fi
@@ -941,14 +945,22 @@ DELEOF
             last_path="$cur_path"
             _jukebox_extract_art "$cur_path"
             _jukebox_cache_art
+            _jukebox_last_next_file=""  # reset so Coming Up Next re-fetches
             force_redraw=1
         fi
 
         if [[ "$cur_paused" != "$last_paused" ]]; then
             last_paused="$cur_paused"
-            # Pause state changes the icon, we can do a partial redraw for just that
-            # but simplest is to just flag it - or we handle it in the fast path below
-            # Let's handle it in the fast path so we don't flicker art
+        fi
+
+        # Check if Coming Up Next needs a retry (empty on previous render)
+        if [[ -z "$_jukebox_last_next_file" ]]; then
+            local _probe_pl_count=$(_jukebox_fast_get "playlist-count")
+            local _probe_pl_pos=$(_jukebox_fast_get "playlist-pos")
+            if [[ -n "$_probe_pl_count" && -n "$_probe_pl_pos" ]] && (( _probe_pl_pos + 1 < _probe_pl_count )); then
+                _jukebox_log "retry: playlist loaded (count=$_probe_pl_count pos=$_probe_pl_pos), forcing redraw"
+                force_redraw=1
+            fi
         fi
 
         # 4. Render
