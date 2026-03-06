@@ -162,7 +162,11 @@ jukebox() {
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
         if [[ -n "$_jukebox_mpv_pid" ]] && kill -0 "$_jukebox_mpv_pid" 2>/dev/null; then
+            _jukebox_set '{"command":["quit"]}' 2>/dev/null
+            sleep 0.1
             kill "$_jukebox_mpv_pid" 2>/dev/null
+            sleep 0.1
+            kill -9 "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
         rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
