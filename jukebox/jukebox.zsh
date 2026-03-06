@@ -43,6 +43,18 @@ _jukebox_fzf_preview='
 
 # --- main function ---
 jukebox() {
+    local _jukebox_debug=0
+    local _jukebox_debuglog="/tmp/jukebox-debug.log"
+    if [[ "$1" == "--debug" || "$1" == "-d" ]]; then
+        _jukebox_debug=1
+        : > "$_jukebox_debuglog"
+        echo "🔧 Debug mode ON → tail -f $_jukebox_debuglog"
+    fi
+
+    _jukebox_log() {
+        (( _jukebox_debug )) && printf '[%s] %s\n' "$(date +%H:%M:%S.%N | cut -c1-12)" "$*" >> "$_jukebox_debuglog"
+    }
+
     local choice files=() start_idx=0
     local musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
 
@@ -142,8 +154,11 @@ jukebox() {
 
     printf '%s\n' "${files[@]}" > "$playlist"
 
-    # cleanup handler
+    # cleanup handler (idempotent — safe to call multiple times)
     _jukebox_cleanup() {
+        [[ -n "$_jukebox_cleaned" ]] && return
+        _jukebox_cleaned=1
+        _jukebox_log "cleanup: starting"
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
         if [[ -n "$_jukebox_mpv_pid" ]] && kill -0 "$_jukebox_mpv_pid" 2>/dev/null; then
@@ -154,12 +169,13 @@ jukebox() {
         unfunction _jukebox_render _jukebox_ipc _jukebox_get _jukebox_get_num \
                    _jukebox_set _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_cleanup 2>/dev/null
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup 2>/dev/null
     }
     setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM EXIT
 
     # start mpv in background with IPC socket, fully headless
+    _jukebox_log "mpv: starting with playlist=$playlist sock=$mpvsock start_idx=$start_idx"
     mpv --no-video --no-terminal \
         --audio-format=s32 \
         --audio-samplerate=0 \
@@ -167,6 +183,7 @@ jukebox() {
         --playlist-start="$start_idx" \
         --input-ipc-server="$mpvsock" &
     _jukebox_mpv_pid=$!
+    _jukebox_log "mpv: PID=$_jukebox_mpv_pid"
 
     # wait for socket
     local waited=0
@@ -174,8 +191,10 @@ jukebox() {
         sleep 0.1
         waited=$((waited + 1))
     done
+    _jukebox_log "mpv: socket wait done (waited=${waited}, socket_exists=$(test -S "$mpvsock" && echo yes || echo no))"
     if [[ ! -S "$mpvsock" ]]; then
         echo "Error: mpv failed to start"
+        _jukebox_log "mpv: FAILED — socket never appeared"
         return 1
     fi
 
@@ -391,12 +410,12 @@ except Exception: pass
             
             if (( queue_x < cols - 15 )); then
                 local next_idx=$((pl_pos + 1))
-                # Extract next filename + item id directly from mpv response in one jq call
-                # Avoids _jukebox_fast_get which pretty-prints the huge playlist array
-                local _pl_cmd=$(jq -nc '{"command":["get_property","playlist"]}' 2>/dev/null)
-                local _pl_raw=$(echo "$_pl_cmd" | socat -t 2 - UNIX-CONNECT:"$mpvsock" 2>/dev/null)
-                local next_file=$(printf '%s' "$_pl_raw" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.filename // empty' 2>/dev/null)
-                local _next_item_id=$(printf '%s' "$_pl_raw" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.id // empty' 2>/dev/null)
+                # Use python IPC for playlist (socat is unreliable for large responses)
+                local _pl_resp=$(_jukebox_ipc '{"command":["get_property","playlist"]}')
+                local next_file=$(printf '%s' "$_pl_resp" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.filename // empty' 2>/dev/null)
+                local _next_item_id=$(printf '%s' "$_pl_resp" | jq -r --arg i "$next_idx" '.data[$i|tonumber]?.id // empty' 2>/dev/null)
+
+                _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx resp_len=${#_pl_resp} next_file=$next_file"
                 
                 if [[ "$next_file" != "$_jukebox_last_next_file" ]]; then
                     _jukebox_last_next_file="$next_file"
