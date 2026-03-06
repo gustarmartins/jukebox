@@ -317,14 +317,14 @@ try:
             except:
                 pass
     s.close()
-    # Output tab-separated values in request order
+    # Output Unit Separator (\x1f) delimited values in request order
     out = []
     for i in range(len(props)):
         out.append(results.get(i + 1, ""))
-    print("\t".join(out))
+    print("\x1f".join(out))
 except Exception:
-    # Output empty tabs so the caller gets the right number of fields
-    print("\t".join(["" for _ in sys.argv[2:]]))
+    # Output empty separators so the caller gets the right number of fields
+    print("\x1f".join(["" for _ in sys.argv[2:]]))
 ' "$mpvsock" "$@" 2>/dev/null
     }
 
@@ -387,7 +387,7 @@ except Exception:
         _batch=$(_jukebox_batch_get path metadata/by-key/title metadata/by-key/artist \
                     metadata/by-key/album playlist-pos playlist-count time-pos duration pause)
         local path title artist album pl_pos pl_count pos dur paused
-        IFS=$'\t' read -r path title artist album pl_pos pl_count pos dur paused <<< "$_batch"
+        IFS=$'\x1f' read -r path title artist album pl_pos pl_count pos dur paused <<< "$_batch"
 
         [[ -z "$path" ]] && return
 
@@ -467,7 +467,7 @@ except Exception:
                 local _next_batch
                 _next_batch=$(_jukebox_batch_get "playlist/$next_idx/filename" "playlist/$next_idx/id")
                 local next_file _next_item_id
-                IFS=$'\t' read -r next_file _next_item_id <<< "$_next_batch"
+                IFS=$'\x1f' read -r next_file _next_item_id <<< "$_next_batch"
 
                 _jukebox_log "next: pl_pos=$pl_pos next_idx=$next_idx next_file=$next_file item_id=$_next_item_id"
                 
@@ -995,7 +995,7 @@ DELEOF
         local _poll_batch
         _poll_batch=$(_jukebox_batch_get path pause playlist-count playlist-pos)
         local cur_path cur_paused _poll_pl_count _poll_pl_pos
-        IFS=$'\t' read -r cur_path cur_paused _poll_pl_count _poll_pl_pos <<< "$_poll_batch"
+        IFS=$'\x1f' read -r cur_path cur_paused _poll_pl_count _poll_pl_pos <<< "$_poll_batch"
 
         if [[ -n "$cur_path" && "$cur_path" != "$last_path" ]]; then
             last_path="$cur_path"
