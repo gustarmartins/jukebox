@@ -36,7 +36,7 @@ _jukebox_fzf_preview='
     [[ -n "$album" ]]  && echo "💿 $album"
     [[ -n "$dur_fmt" ]] && echo "⏱  $dur_fmt"
     echo ""
-    if ffmpeg -y -v quiet -i {} -an -vcodec copy -update 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
+    if ffmpeg -y -v quiet -i {} -an -vcodec mjpeg -frames:v 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
         chafa --size 40x20 "$tmpcover" 2>/dev/null
     fi
 '
@@ -334,7 +334,7 @@ except Exception as e:
     # --- extract cover art ---
     _jukebox_extract_art() {
         local filepath="$1"
-        ffmpeg -y -v quiet -i "$filepath" -an -vcodec copy -update 1 "$coverfile" 2>/dev/null
+        ffmpeg -y -v quiet -i "$filepath" -an -vcodec mjpeg -frames:v 1 "$coverfile" 2>/dev/null
     }
 
     # --- cache chafa output for current cover ---
@@ -386,7 +386,7 @@ except Exception as e:
         local next_item_id="$2"
 
         rm -f "$coverfile_next" 2>/dev/null
-        ffmpeg -y -v quiet -i "$next_file" -an -vcodec copy -update 1 "$coverfile_next" 2>/dev/null
+        ffmpeg -y -v quiet -i "$next_file" -an -vcodec mjpeg -frames:v 1 "$coverfile_next" 2>/dev/null
         if [[ -s "$coverfile_next" ]]; then
             _jukebox_next_art_text=$(chafa --size 20x10 "$coverfile_next" 2>/dev/null)
         else
