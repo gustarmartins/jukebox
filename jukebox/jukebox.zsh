@@ -349,6 +349,7 @@ except Exception as e:
         else
             _jukebox_art_text=""
         fi
+        _jukebox_art_w=$art_w
     }
 
     # center helper
@@ -553,17 +554,16 @@ except Exception as e:
 
         # Coming Up Next panel (pure display from pre-fetched _jukebox_next_* vars)
         if [[ -n "$pl_pos" ]]; then
-            local art_w_est=$(( _art_line_count * 2 ))
-            (( art_w_est == 0 )) && art_w_est=10
+            local art_w_est=${_jukebox_art_w:-10}
             local queue_x=$(( cols - 40 ))
             (( queue_x < art_w_est + 6 )) && queue_x=$(( art_w_est + 6 ))
 
             if (( queue_x < cols - 15 )); then
                 local q_y=7
-                local _src_icon=""
-                [[ "$_jukebox_next_source" == "queued" ]] && _src_icon="  📋 Queued"
-                [[ "$_jukebox_next_source" == "library" ]] && _src_icon="  📚 Up Next"
-                printf '\e[%d;%dH\e[1m🎵 Coming Up Next%s\e[0m' "$q_y" "$queue_x" "$_src_icon"
+                local _title_label="🎵 Coming Up Next"
+                [[ "$_jukebox_next_source" == "queued" ]] && _title_label="📋 Queued Next"
+                [[ "$_jukebox_next_source" == "library" ]] && _title_label="📚 Up Next"
+                printf '\e[%d;%dH\e[1m%s\e[0m' "$q_y" "$queue_x" "$_title_label"
                 q_y=$((q_y + 2))
 
                 if [[ -n "$_jukebox_last_next_file" ]]; then
