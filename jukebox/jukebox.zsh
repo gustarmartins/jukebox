@@ -555,10 +555,9 @@ except Exception as e:
         # Coming Up Next panel (pure display from pre-fetched _jukebox_next_* vars)
         if [[ -n "$pl_pos" ]]; then
             local art_w_est=${_jukebox_art_w:-10}
-            local queue_x=$(( cols - 40 ))
-            (( queue_x < art_w_est + 6 )) && queue_x=$(( art_w_est + 6 ))
+            local queue_x=$(( art_w_est + 8 ))
 
-            if (( queue_x < cols - 15 )); then
+            if (( cols - queue_x > 25 )); then
                 local q_y=7
                 local _title_label="🎵 Coming Up Next"
                 [[ "$_jukebox_next_source" == "queued" ]] && _title_label="📋 Queued Next"
@@ -568,11 +567,18 @@ except Exception as e:
 
                 if [[ -n "$_jukebox_last_next_file" ]]; then
                     if [[ -n "$_jukebox_next_art_text" ]]; then
+                        local start_q_y=$q_y
                         local art_lines=("${(@f)_jukebox_next_art_text}")
                         for l in "${art_lines[@]}"; do
                             printf '\e[%d;%dH%s' "$q_y" "$queue_x" "$l"
                             q_y=$((q_y + 1))
                         done
+                        # Kitty/Sixel outputs 1 line but visually extends.
+                        # We used --size 20x10. Ensure the cursor passes the image.
+                        local printed_lines=$(( q_y - start_q_y ))
+                        if (( printed_lines < 10 )); then
+                            q_y=$(( start_q_y + 10 ))
+                        fi
                     fi
 
                     q_y=$((q_y + 1))
