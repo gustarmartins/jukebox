@@ -64,6 +64,111 @@ jukebox() {
     fi
     export _JUKEBOX_PYTHON
 
+    local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
+    local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
+    local coverfile=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
+    local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
+    local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
+    local queuefile="/tmp/jukebox-queue-$$.txt"
+    local cachefile="/tmp/jukebox-meta-$$.tsv"
+    export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
+    export _JUKEBOX_CACHE="$cachefile"
+    local _jukebox_cleaned=""
+    local _jukebox_art_text=""
+    local saved_stty=$(stty -g 2>/dev/null)
+
+    # --- build metadata cache in background for sorting ---
+    "$_JUKEBOX_PYTHON" -c "
+import subprocess, json, os, sys
+musicdir = sys.argv[1]
+out = open(sys.argv[2], 'w')
+for root, dirs, files in os.walk(musicdir):
+    for f in sorted(files):
+        if not f.lower().endswith('.flac'): continue
+        fp = os.path.join(root, f)
+        try:
+            r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
+                               capture_output=True, text=True, timeout=10)
+            d = json.loads(r.stdout)
+            tags = d.get('format',{}).get('tags',{})
+            get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+            title = get('title') or f.replace('.flac','')
+            artist = get('artist') or 'Unknown'
+            album = get('album') or 'Unknown'
+            date = get('date') or '0'
+            dur = d.get('format',{}).get('duration','0')
+            out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\n')
+        except: pass
+out.close()
+" "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" "$cachefile" &
+    local _cache_pid=$!
+
+    _jukebox_setup_fzf_sort() {
+        if [[ -n "$_cache_pid" ]] && kill -0 "$_cache_pid" 2>/dev/null; then
+            echo "⏳ Building music library metadata cache..."
+            wait "$_cache_pid" 2>/dev/null
+        fi
+
+        _fzf_sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
+        cat > "$_fzf_sort_dir/by_title.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_title_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k2 -fr "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_artist.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k3,3 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_artist_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k3,3 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_album.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k4,4 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_album_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k4,4 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_date.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k5 -rn "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_date_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k5 -n "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_length.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k6 -n "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        cat > "$_fzf_sort_dir/by_length_rev.sh" << 'SORTEOF'
+#!/usr/bin/env bash
+sort -t$'\t' -k6 -nr "$_JUKEBOX_CACHE" | cut -f1
+SORTEOF
+        chmod +x "$_fzf_sort_dir"/*.sh
+
+        _fzf_binds=()
+        if [[ -s "$_JUKEBOX_CACHE" ]]; then
+            _fzf_binds=(
+                --bind "alt-t:reload($_fzf_sort_dir/by_title.sh)"
+                --bind "alt-T:reload($_fzf_sort_dir/by_title_rev.sh)"
+                --bind "alt-a:reload($_fzf_sort_dir/by_artist.sh)"
+                --bind "alt-A:reload($_fzf_sort_dir/by_artist_rev.sh)"
+                --bind "alt-b:reload($_fzf_sort_dir/by_album.sh)"
+                --bind "alt-B:reload($_fzf_sort_dir/by_album_rev.sh)"
+                --bind "alt-d:reload($_fzf_sort_dir/by_date.sh)"
+                --bind "alt-D:reload($_fzf_sort_dir/by_date_rev.sh)"
+                --bind "alt-l:reload($_fzf_sort_dir/by_length.sh)"
+                --bind "alt-L:reload($_fzf_sort_dir/by_length_rev.sh)"
+            )
+        fi
+    }
+
     local choice files=() start_idx=0
     local musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
 
@@ -87,19 +192,59 @@ jukebox() {
         4) files=("$musicdir"/**/*.flac(N.Om)) ;;
         5) files=("$musicdir"/**/*.flac(N.om)) ;;
         6)
-            files=("$musicdir"/**/*.flac(N.on))
-            if [[ ${#files[@]} -eq 0 ]]; then
+            local all_files=("$musicdir"/**/*.flac(N.on))
+            if [[ ${#all_files[@]} -eq 0 ]]; then
                 echo "No FLAC files found in $musicdir"
                 return 1
             fi
-            local picked=$(printf '%s\n' "${files[@]}" | \
-                fzf --prompt="Pick start song: " \
+            
+            _jukebox_setup_fzf_sort
+            
+            local fzf_header="TAB=toggle  ENTER=play/queue  ESC=cancel"
+            if [[ -s "$cachefile" ]]; then
+                fzf_header="$fzf_header
+─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
+            fi
+
+            local input_list
+            if [[ -s "$cachefile" ]]; then
+                input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
+            else
+                input_list=$(printf '%s\n' "${all_files[@]}")
+            fi
+
+            local selected
+            selected=$(echo "$input_list" | \
+                fzf --multi \
+                    --prompt="Pick start song(s): " \
+                    --header="$fzf_header" \
+                    --marker="✔ " \
                     --preview "$_jukebox_fzf_preview" \
-                    --preview-window=right:50%)
-            [[ -z "$picked" ]] && return
-            for i in {1..${#files[@]}}; do
-                [[ "${files[$i]}" == "$picked" ]] && { start_idx=$((i - 1)); break; }
+                    --preview-window=right:50% \
+                    "${_fzf_binds[@]}")
+                    
+            rm -rf "$_fzf_sort_dir"
+            [[ -z "$selected" ]] && return
+            
+            local picked_arr=("${(@f)${selected}}")
+            local last_picked="${picked_arr[-1]}"
+            local last_idx=-1
+            for i in {1..${#all_files[@]}}; do
+                [[ "${all_files[$i]}" == "$last_picked" ]] && { last_idx=$i; break; }
             done
+            
+            files=("${picked_arr[@]}")
+            if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
+                local -A seen
+                for x in "${picked_arr[@]}"; do seen[$x]=1; done
+                for ((i=last_idx+1; i<=${#all_files[@]}; i++)); do
+                    local f="${all_files[$i]}"
+                    if [[ -z "${seen[$f]}" ]]; then
+                        files+=("$f")
+                    fi
+                done
+            fi
+            start_idx=0
             ;;
         7)
             local -a _tmp=("$musicdir"/**/*.flac(N.))
@@ -118,15 +263,34 @@ jukebox() {
                 echo "No FLAC files found in $musicdir"
                 return 1
             fi
+            
+            _jukebox_setup_fzf_sort
+            
+            local fzf_header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play"
+            if [[ -s "$cachefile" ]]; then
+                fzf_header="$fzf_header
+─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
+            fi
+            
+            local input_list
+            if [[ -s "$cachefile" ]]; then
+                input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
+            else
+                input_list=$(printf '%s\n' "${all_files[@]}")
+            fi
+
             local selected
-            selected=$(printf '%s\n' "${all_files[@]}" | \
+            selected=$(echo "$input_list" | \
                 fzf --multi \
                     --prompt="Queue: " \
-                    --header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play" \
+                    --header="$fzf_header" \
                     --marker="✔ " \
                     --preview "$_jukebox_fzf_preview" \
                     --preview-window=right:50% \
-                    --bind 'ctrl-a:select-all,ctrl-d:deselect-all')
+                    --bind 'ctrl-a:select-all,ctrl-d:deselect-all' \
+                    "${_fzf_binds[@]}")
+                    
+            rm -rf "$_fzf_sort_dir"
             [[ -z "$selected" ]] && return
             files=("${(@f)${selected}}")
             echo ""
@@ -137,6 +301,7 @@ jukebox() {
                 echo "  $n) $_fname"
                 n=$((n + 1))
             done
+            start_idx=0
             ;;
         q|Q) return ;;
         *) echo "Invalid choice"; return 1 ;;
@@ -147,18 +312,7 @@ jukebox() {
         return 1
     fi
 
-    # temp files
-    local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
-    local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
-    local coverfile=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
-    local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
-    local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
-    local queuefile="/tmp/jukebox-queue-$$.txt"
-    local cachefile="/tmp/jukebox-meta-$$.tsv"
-    export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
-    local _jukebox_cleaned=""
-    local _jukebox_art_text=""
-    local saved_stty=$(stty -g 2>/dev/null)
+
 
     : > "$queuefile"  # create empty tracker for manually queued songs
 
@@ -180,11 +334,12 @@ jukebox() {
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
         rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
+        rm -rf "$_fzf_sort_dir"
         unfunction _jukebox_render _jukebox_ipc \
                    _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup 2>/dev/null
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup _jukebox_setup_fzf_sort 2>/dev/null
     }
     setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM EXIT
@@ -212,33 +367,6 @@ jukebox() {
         _jukebox_log "mpv: FAILED — socket never appeared"
         return 1
     fi
-
-    # --- build metadata cache in background for sorting ---
-    "$_JUKEBOX_PYTHON" -c "
-import subprocess, json, os, sys
-musicdir = sys.argv[1]
-out = open(sys.argv[2], 'w')
-for root, dirs, files in os.walk(musicdir):
-    for f in sorted(files):
-        if not f.lower().endswith('.flac'): continue
-        fp = os.path.join(root, f)
-        try:
-            r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
-                               capture_output=True, text=True, timeout=10)
-            d = json.loads(r.stdout)
-            tags = d.get('format',{}).get('tags',{})
-            # FLAC tags can be uppercase or lowercase
-            get = lambda k: tags.get(k, tags.get(k.upper(), ''))
-            title = get('title') or f.replace('.flac','')
-            artist = get('artist') or 'Unknown'
-            album = get('album') or 'Unknown'
-            date = get('date') or '0'
-            dur = d.get('format',{}).get('duration','0')
-            out.write(f'{fp}\\t{title}\\t{artist}\\t{album}\\t{date}\\t{dur}\\n')
-        except: pass
-out.close()
-" "$musicdir" "$cachefile" &
-    local _cache_pid=$!
 
     # --- IPC helper using python for reliable Unix socket communication ---
     _jukebox_ipc() {
@@ -513,7 +641,8 @@ except Exception as e:
             bar=" [$(printf '━%.0s' {1..$filled} 2>/dev/null)$(printf '─%.0s' {1..$empty} 2>/dev/null)]"
         fi
 
-        local controls="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  []=speed  A=add next  L=queue  q=quit"
+        local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  []=speed"
+        local controls2="A=add next  L=queue  j/k=nav next  ENTER=play nav  q=quit"
         local info="♫  $title"
         [[ -n "$artist" ]] && info="$info  —  $artist"
         local track_info="[$((pl_pos + 1)) / $pl_count]"
@@ -527,9 +656,11 @@ except Exception as e:
         # Disable auto-wrap, clear screen, hide cursor
         printf '\e[?7l\e[2J\e[?25l'
 
-        # row 1: controls (dim)
+        # row 1 & 2: controls (dim)
         printf '\e[1;1H\e[2m'
-        _jukebox_padline "$(_jukebox_center "$controls" $cols)" $cols
+        _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
+        printf '\e[2;1H'
+        _jukebox_padline "$(_jukebox_center "$controls2" $cols)" $cols
         printf '\e[0m'
 
         # row 3: song info
@@ -562,6 +693,7 @@ except Exception as e:
                 local _title_label="🎵 Coming Up Next"
                 [[ "$_jukebox_next_source" == "queued" ]] && _title_label="📋 Queued Next"
                 [[ "$_jukebox_next_source" == "library" ]] && _title_label="📚 Up Next"
+                (( _nav_offset > 0 )) && _title_label="$_title_label (+$_nav_offset)"
                 printf '\e[%d;%dH\e[1m%s\e[0m' "$q_y" "$queue_x" "$_title_label"
                 q_y=$((q_y + 2))
 
@@ -621,7 +753,7 @@ except Exception as e:
                         printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_genre"; q_y=$((q_y + 1))
                     fi
                 else
-                    local next_idx=$((_render_pl_pos + 1))
+                    local next_idx=$((pl_pos + 1 + _nav_offset))
                     if (( next_idx < pl_count )); then
                         printf '\e[%d;%dH\e[2m⏳ Loading...\e[0m' "$q_y" "$queue_x"
                     else
@@ -645,81 +777,13 @@ except Exception as e:
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
-        # wait for metadata cache if still building
-        if [[ -n "$_cache_pid" ]] && kill -0 "$_cache_pid" 2>/dev/null; then
-            echo "⏳ Building music library metadata cache..."
-            wait "$_cache_pid" 2>/dev/null
-        fi
-
-        local sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
-        export _JUKEBOX_CACHE="$cachefile"
-
-        # --- sort helper scripts for fzf reload ---
-        cat > "$sort_dir/by_title.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$sort_dir/by_title_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k2 -fr "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-
-        cat > "$sort_dir/by_artist.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k3,3 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$sort_dir/by_artist_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k3,3 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-
-        cat > "$sort_dir/by_album.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k4,4 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$sort_dir/by_album_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k4,4 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-
-        cat > "$sort_dir/by_date.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k5 -rn "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$sort_dir/by_date_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k5 -n "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-
-        cat > "$sort_dir/by_length.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k6 -n "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$sort_dir/by_length_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k6 -nr "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-
-        chmod +x "$sort_dir"/*.sh
+        _jukebox_setup_fzf_sort
 
         local fzf_header="TAB=toggle  ENTER=add to queue  ESC=cancel"
-        local fzf_binds=()
 
         if [[ -s "$cachefile" ]]; then
             fzf_header="$fzf_header
 ─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
-            fzf_binds=(
-                --bind "alt-t:reload($sort_dir/by_title.sh)"
-                --bind "alt-T:reload($sort_dir/by_title_rev.sh)"
-                --bind "alt-a:reload($sort_dir/by_artist.sh)"
-                --bind "alt-A:reload($sort_dir/by_artist_rev.sh)"
-                --bind "alt-b:reload($sort_dir/by_album.sh)"
-                --bind "alt-B:reload($sort_dir/by_album_rev.sh)"
-                --bind "alt-d:reload($sort_dir/by_date.sh)"
-                --bind "alt-D:reload($sort_dir/by_date_rev.sh)"
-                --bind "alt-l:reload($sort_dir/by_length.sh)"
-                --bind "alt-L:reload($sort_dir/by_length_rev.sh)"
-            )
         fi
 
         # default list: sorted by title if cache ready, else by filename
@@ -739,13 +803,13 @@ SORTEOF
                 --marker="✔ " \
                 --preview "$_jukebox_fzf_preview" \
                 --preview-window=right:50% \
-                "${fzf_binds[@]}")
+                "${_fzf_binds[@]}")
 
         # re-enter altscreen
         printf '\e[?1049h\e[?25l'
         stty -echo -icanon min 0 time 0 2>/dev/null
 
-        rm -rf "$sort_dir"
+        rm -rf "$_fzf_sort_dir"
 
         [[ -z "$selected" ]] && return
 
@@ -934,6 +998,7 @@ DELEOF
     local _render_time_pos=0 _render_duration=0 _render_paused=""
     local _jukebox_last_next_file=""
     local _jukebox_next_retries=0
+    local _nav_offset=0
 
     # initial data fetch (retry until mpv is ready)
     sleep 0.5
@@ -975,6 +1040,23 @@ DELEOF
                 '[')  _jukebox_set '{"command":["add","speed",-0.25]}' ;;
                 ']')  _jukebox_set '{"command":["add","speed",0.25]}' ;;
                 $'\x7f') _jukebox_set '{"command":["set_property","speed",1.0]}' ;;
+                'j')
+                    if (( _render_pl_pos + 1 + _nav_offset < _render_pl_count - 1 )); then
+                        _nav_offset=$((_nav_offset + 1)); _jukebox_last_next_file=""; force_redraw=1
+                    fi
+                    ;;
+                'k')
+                    if (( _nav_offset > 0 )); then
+                        _nav_offset=$((_nav_offset - 1)); _jukebox_last_next_file=""; force_redraw=1
+                    fi
+                    ;;
+                $'\n'|$'\r')
+                    local cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((_render_pl_pos + 1 + _nav_offset))")
+                    _jukebox_set "$cmd"
+                    _nav_offset=0
+                    _jukebox_last_next_file=""
+                    force_redraw=1
+                    ;;
                 'a'|'A')
                     _jukebox_add_next
                     _jukebox_last_next_file=""
@@ -1019,7 +1101,7 @@ DELEOF
         fi
 
         # 3. Fetch ALL data in a single IPC call (one python3 process per tick)
-        _est_next=$((_render_pl_pos + 1))
+        _est_next=$((_render_pl_pos + 1 + _nav_offset))
         
         _poll_batch=$(_jukebox_batch_get path pause playlist-count playlist-pos \
             time-pos duration metadata/by-key/title metadata/by-key/artist \
@@ -1042,6 +1124,7 @@ DELEOF
         # 4. Handle track change
         if [[ -n "$_render_path" && "$_render_path" != "$last_path" ]]; then
             last_path="$_render_path"
+            _nav_offset=0
             _jukebox_extract_art "$_render_path"
             _jukebox_cache_art
             _jukebox_last_next_file=""
