@@ -515,62 +515,73 @@ except Exception as e:
         local avail_rows=$(( _layout_content_bottom - _layout_art_start_row ))
         (( avail_rows < 0 )) && avail_rows=0
 
-        # --- Main album art sizing ---
-        # Height: up to 60% of available content rows, min 4
-        _layout_art_h=$(( avail_rows * 60 / 100 ))
-        (( _layout_art_h < 4 )) && _layout_art_h=4
-        (( _layout_art_h > avail_rows )) && _layout_art_h=$avail_rows
+        # --- Determine layout strategy FIRST, then size art to fit ---
+        # Strategy: if terminal is wide enough, do side-by-side and give art ~60% of width.
+        # Otherwise, art gets full width and "Up Next" goes below or is hidden.
 
-        # Width: 2x height (terminal chars ~2:1 aspect ratio), capped to terminal
-        _layout_art_w=$(( _layout_art_h * 2 ))
-        local max_art_w=$(( cols - 2 ))
-        (( max_art_w < 4 )) && max_art_w=4
-        if (( _layout_art_w > max_art_w )); then
-            _layout_art_w=$max_art_w
-            _layout_art_h=$(( _layout_art_w / 2 ))
-            (( _layout_art_h < 4 )) && _layout_art_h=4
-        fi
+        local min_panel_w=30   # minimum width for Up Next panel
 
-        # --- Determine "Up Next" panel placement ---
-        local right_space=$(( cols - _layout_art_w - 6 ))  # space to the right of art
-        local below_space=$(( _layout_content_bottom - _layout_art_start_row - _layout_art_h ))
-
-        if (( right_space >= 30 && avail_rows >= 8 )); then
-            # Side-by-side: enough horizontal AND vertical space
+        if (( cols >= 66 && avail_rows >= 8 )); then
+            # --- SIDE-BY-SIDE layout ---
             _layout_next_mode="side"
+
+            # Art gets ~60% of width, panel gets the rest
+            _layout_art_w=$(( (cols - 6) * 60 / 100 ))
+            (( _layout_art_w < 20 )) && _layout_art_w=20
+            # Ensure panel has at least min_panel_w
+            local panel_w=$(( cols - _layout_art_w - 6 ))
+            if (( panel_w < min_panel_w )); then
+                _layout_art_w=$(( cols - min_panel_w - 6 ))
+                (( _layout_art_w < 20 )) && _layout_art_w=20
+                panel_w=$(( cols - _layout_art_w - 6 ))
+            fi
+
+            # Art height from width (2:1 ratio), capped to available rows
+            _layout_art_h=$(( _layout_art_w / 2 ))
+            (( _layout_art_h > avail_rows )) && _layout_art_h=$avail_rows
+            (( _layout_art_h < 4 )) && _layout_art_h=4
+
             _layout_next_x=$(( _layout_art_w + 6 ))
             _layout_next_y=$_layout_art_start_row
 
-            # Next art: scale to fit available side space
-            _layout_next_art_w=$(( right_space * 60 / 100 ))
-            (( _layout_next_art_w > 30 )) && _layout_next_art_w=30
+            # Next art: 20x10 fixed target, scaled down if needed
+            _layout_next_art_w=20
+            (( _layout_next_art_w > panel_w - 2 )) && _layout_next_art_w=$((panel_w - 2))
             (( _layout_next_art_w < 8 )) && _layout_next_art_w=8
             _layout_next_art_h=$(( _layout_next_art_w / 2 ))
-            # Ensure next art doesn't overflow vertically
-            local max_next_art_h=$(( avail_rows - 8 ))  # reserve space for metadata lines
+            local max_next_art_h=$(( avail_rows - 8 ))
             (( max_next_art_h < 3 )) && max_next_art_h=3
             (( _layout_next_art_h > max_next_art_h )) && _layout_next_art_h=$max_next_art_h
             (( _layout_next_art_h < 3 )) && _layout_next_art_h=3
 
-        elif (( below_space >= 5 && cols >= 30 )); then
-            # Stacked: show "Up Next" below the main art
-            _layout_next_mode="below"
-            _layout_next_x=3
-            _layout_next_y=$(( _layout_art_start_row + _layout_art_h + 1 ))
-
-            # Smaller art in stacked mode
-            _layout_next_art_w=$(( cols / 4 ))
-            (( _layout_next_art_w > 20 )) && _layout_next_art_w=20
-            (( _layout_next_art_w < 8 )) && _layout_next_art_w=8
-            _layout_next_art_h=$(( _layout_next_art_w / 2 ))
-            local max_below_art_h=$(( below_space - 3 ))  # room for label + art
-            (( _layout_next_art_h > max_below_art_h )) && _layout_next_art_h=$max_below_art_h
-            (( _layout_next_art_h < 3 )) && _layout_next_art_h=3
         else
-            # Too small: hide "Up Next" entirely
-            _layout_next_mode="hidden"
-            _layout_next_art_w=0
-            _layout_next_art_h=0
+            # --- NO SIDE PANEL: art gets full width ---
+            _layout_art_w=$(( cols - 2 ))
+            (( _layout_art_w < 4 )) && _layout_art_w=4
+            _layout_art_h=$(( _layout_art_w / 2 ))
+            (( _layout_art_h > avail_rows )) && _layout_art_h=$avail_rows
+            (( _layout_art_h < 4 )) && _layout_art_h=4
+
+            local below_space=$(( _layout_content_bottom - _layout_art_start_row - _layout_art_h ))
+            if (( below_space >= 5 && cols >= 30 )); then
+                # Stacked: show "Up Next" below the main art
+                _layout_next_mode="below"
+                _layout_next_x=3
+                _layout_next_y=$(( _layout_art_start_row + _layout_art_h + 1 ))
+
+                _layout_next_art_w=$(( cols / 4 ))
+                (( _layout_next_art_w > 20 )) && _layout_next_art_w=20
+                (( _layout_next_art_w < 8 )) && _layout_next_art_w=8
+                _layout_next_art_h=$(( _layout_next_art_w / 2 ))
+                local max_below_art_h=$(( below_space - 3 ))
+                (( max_below_art_h < 2 )) && max_below_art_h=2
+                (( _layout_next_art_h > max_below_art_h )) && _layout_next_art_h=$max_below_art_h
+                (( _layout_next_art_h < 2 )) && _layout_next_art_h=2
+            else
+                _layout_next_mode="hidden"
+                _layout_next_art_w=0
+                _layout_next_art_h=0
+            fi
         fi
     }
 
@@ -735,14 +746,20 @@ except Exception as e:
         q_y=$((q_y + 2))
 
         if [[ -n "$_jukebox_last_next_file" ]]; then
-            # Art
+            # Art — with Kitty graphics protocol, chafa may output only 1 text
+            # line but the image visually spans _layout_next_art_h rows.
+            # We must advance q_y by the VISUAL height, not the text line count.
             if [[ -n "$_jukebox_next_art_text" ]]; then
+                local start_q_y=$q_y
                 local art_lines=("${(@f)_jukebox_next_art_text}")
                 for l in "${art_lines[@]}"; do
                     (( q_y > max_y )) && break
                     printf '\e[%d;%dH%s' "$q_y" "$nx" "$l"
                     q_y=$((q_y + 1))
                 done
+                # Ensure cursor advances past the visual image height
+                local visual_end=$(( start_q_y + _layout_next_art_h ))
+                (( q_y < visual_end )) && q_y=$visual_end
             fi
 
             q_y=$((q_y + 1))
