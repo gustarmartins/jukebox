@@ -20,23 +20,23 @@
 # --- fzf preview script (metadata + album art) ---
 _jukebox_fzf_preview='
     tmpcover="$_JUKEBOX_PREVTMP"
-    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- {} 2>/dev/null)
-    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- {} 2>/dev/null)
-    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- {} 2>/dev/null)
-    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 -- {} 2>/dev/null)
+    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
+    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
+    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
+    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
     if [[ -n "$duration" ]]; then
         dur_int=${duration%.*}
         mins=$((dur_int / 60))
         secs=$((dur_int % 60))
         dur_fmt=$(printf "%d:%02d" "$mins" "$secs")
     fi
-    fname={}; fname=${fname##*/}; fname=${fname%.flac}
+    fname="{1}"; fname=${fname##*/}; fname=${fname%.flac}
     echo "🎵 ${title:-$fname}"
     [[ -n "$artist" ]] && echo "🎤 $artist"
     [[ -n "$album" ]]  && echo "💿 $album"
     [[ -n "$dur_fmt" ]] && echo "⏱  $dur_fmt"
     echo ""
-    if ffmpeg -y -v quiet -i {} -an -vcodec mjpeg -frames:v 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
+    if ffmpeg -y -v quiet -i "{1}" -an -vcodec mjpeg -frames:v 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
         chafa --size 40x20 "$tmpcover" 2>/dev/null
     fi
 '
@@ -45,11 +45,31 @@ _jukebox_fzf_preview='
 jukebox() {
     local _jukebox_debug=0
     local _jukebox_debuglog="/tmp/jukebox-debug.log"
-    if [[ "$1" == "--debug" || "$1" == "-d" ]]; then
-        _jukebox_debug=1
-        : > "$_jukebox_debuglog"
-        echo "🔧 Debug mode ON → tail -f $_jukebox_debuglog"
-    fi
+    local _jukebox_show_formatnames=1
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug|-d)
+                _jukebox_debug=1
+                : > "$_jukebox_debuglog"
+                echo "🔧 Debug mode ON → tail -f $_jukebox_debuglog"
+                shift
+                ;;
+            --show-filenames)
+                _jukebox_show_formatnames=0
+                shift
+                ;;
+            --show-formatnames)
+                _jukebox_show_formatnames=1
+                shift
+                ;;
+            *)
+                echo "❌ Unknown argument: $1"
+                return 1
+                ;;
+        esac
+    done
+
 
     _jukebox_log() {
         (( _jukebox_debug )) && printf '[%s] %s\n' "$SECONDS" "$*" >> "$_jukebox_debuglog"
@@ -73,6 +93,7 @@ jukebox() {
     local cachefile="/tmp/jukebox-meta-$$.tsv"
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
+    export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
     local _jukebox_cleaned=""
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
@@ -110,46 +131,27 @@ out.close()
         fi
 
         _fzf_sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
-        cat > "$_fzf_sort_dir/by_title.sh" << 'SORTEOF'
+        _gen_sort() {
+            cat > "$_fzf_sort_dir/$2.sh" << SORTEOF
 #!/usr/bin/env bash
-sort -t$'\t' -k2 -f "$_JUKEBOX_CACHE" | cut -f1
+if (( \$_JUKEBOX_SHOW_FORMATNAMES )); then
+    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s - %s\\n", \$1, \$2, \$3 }'
+else
+    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s\\n", \$1, \$1 }'
+fi
 SORTEOF
-        cat > "$_fzf_sort_dir/by_title_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k2 -fr "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_artist.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k3,3 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_artist_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k3,3 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_album.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k4,4 -f -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_album_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k4,4 -fr -k2,2 -f "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_date.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k5 -rn "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_date_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k5 -n "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_length.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k6 -n "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
-        cat > "$_fzf_sort_dir/by_length_rev.sh" << 'SORTEOF'
-#!/usr/bin/env bash
-sort -t$'\t' -k6 -nr "$_JUKEBOX_CACHE" | cut -f1
-SORTEOF
+        }
+
+        _gen_sort "sort -t$'\t' -k2 -f" "by_title"
+        _gen_sort "sort -t$'\t' -k2 -fr" "by_title_rev"
+        _gen_sort "sort -t$'\t' -k3,3 -f -k2,2 -f" "by_artist"
+        _gen_sort "sort -t$'\t' -k3,3 -fr -k2,2 -f" "by_artist_rev"
+        _gen_sort "sort -t$'\t' -k4,4 -f -k2,2 -f" "by_album"
+        _gen_sort "sort -t$'\t' -k4,4 -fr -k2,2 -f" "by_album_rev"
+        _gen_sort "sort -t$'\t' -k5 -rn" "by_date"
+        _gen_sort "sort -t$'\t' -k5 -n" "by_date_rev"
+        _gen_sort "sort -t$'\t' -k6 -n" "by_length"
+        _gen_sort "sort -t$'\t' -k6 -nr" "by_length_rev"
         chmod +x "$_fzf_sort_dir"/*.sh
 
         _fzf_binds=()
@@ -166,6 +168,22 @@ SORTEOF
                 --bind "alt-l:reload($_fzf_sort_dir/by_length.sh)"
                 --bind "alt-L:reload($_fzf_sort_dir/by_length_rev.sh)"
             )
+        fi
+    }
+
+    _jukebox_get_input_list() {
+        if [[ -s "$cachefile" ]]; then
+            if (( _jukebox_show_formatnames )); then
+                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{ printf "%s\t%s - %s\n", $1, $2, $3 }'
+            else
+                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{ printf "%s\t%s\n", $1, $1 }'
+            fi
+        else
+            if (( _jukebox_show_formatnames )); then
+                for f in "$@"; do printf "%s\t%s\n" "$f" "${f##*/}"; done
+            else
+                for f in "$@"; do printf "%s\t%s\n" "$f" "$f"; done
+            fi
         fi
     }
 
@@ -207,15 +225,12 @@ SORTEOF
             fi
 
             local input_list
-            if [[ -s "$cachefile" ]]; then
-                input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
-            else
-                input_list=$(printf '%s\n' "${all_files[@]}")
-            fi
+            input_list=$(_jukebox_get_input_list "${all_files[@]}")
 
             local selected
             selected=$(echo "$input_list" | \
                 fzf --multi \
+                    --delimiter=$'\t' --with-nth=2 \
                     --prompt="Pick start song(s): " \
                     --header="$fzf_header" \
                     --marker="✔ " \
@@ -226,7 +241,8 @@ SORTEOF
             rm -rf "$_fzf_sort_dir"
             [[ -z "$selected" ]] && return
             
-            local picked_arr=("${(@f)${selected}}")
+            # Extract first column (filepath)
+            local picked_arr=("${(@f)${$(echo "$selected" | cut -f1)}}")
             local last_picked="${picked_arr[-1]}"
             local last_idx=-1
             for i in {1..${#all_files[@]}}; do
@@ -273,15 +289,12 @@ SORTEOF
             fi
             
             local input_list
-            if [[ -s "$cachefile" ]]; then
-                input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
-            else
-                input_list=$(printf '%s\n' "${all_files[@]}")
-            fi
+            input_list=$(_jukebox_get_input_list "${all_files[@]}")
 
             local selected
             selected=$(echo "$input_list" | \
                 fzf --multi \
+                    --delimiter=$'\t' --with-nth=2 \
                     --prompt="Queue: " \
                     --header="$fzf_header" \
                     --marker="✔ " \
@@ -292,7 +305,7 @@ SORTEOF
                     
             rm -rf "$_fzf_sort_dir"
             [[ -z "$selected" ]] && return
-            files=("${(@f)${selected}}")
+            files=("${(@f)${$(echo "$selected" | cut -f1)}}")
             echo ""
             echo "📋 Queue (${#files[@]} songs):"
             local n=1
@@ -335,8 +348,9 @@ SORTEOF
         fi
         rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
         rm -rf "$_fzf_sort_dir"
-        unfunction _jukebox_render _jukebox_ipc \
+        unfunction _jukebox_render _jukebox_render_next_panel _jukebox_ipc \
                    _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
+                   _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
                    _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup _jukebox_setup_fzf_sort 2>/dev/null
@@ -466,18 +480,122 @@ except Exception as e:
     }
 
     # --- cache chafa output for current cover ---
-    _jukebox_cache_art() {
+    # --- layout engine: computes all dimensions from terminal size ---
+    # Sets: _layout_mode (normal|compact|minimal)
+    #       _layout_header_rows, _layout_art_start_row
+    #       _layout_art_w, _layout_art_h
+    #       _layout_next_mode (side|below|hidden)
+    #       _layout_next_art_w, _layout_next_art_h
+    #       _layout_next_x, _layout_next_y (for side mode)
+    #       _layout_content_bottom (last row available before progress bar)
+    _jukebox_calc_layout() {
         local cols=$(tput cols) rows=$(tput lines)
-        local art_h=$((rows * 45 / 100))
-        (( art_h < 6 )) && art_h=6
-        local art_w=$((art_h * 2))
-        (( art_w > cols - 4 )) && art_w=$((cols - 4))
+        _layout_cols=$cols
+        _layout_rows=$rows
+
+        # --- Header mode based on available rows ---
+        if (( rows <= 10 )); then
+            _layout_mode="minimal"    # bare essentials only
+            _layout_header_rows=1     # song info only
+        elif (( rows <= 20 )); then
+            _layout_mode="compact"    # condensed controls
+            _layout_header_rows=3     # controls + info + track
+        else
+            _layout_mode="normal"     # full header
+            _layout_header_rows=5     # controls1 + controls2 + info + album + track
+        fi
+
+        # Progress bar always takes 1 row at the bottom
+        _layout_content_bottom=$(( rows - 1 ))
+
+        # Art starts 1 row after header (gap row)
+        _layout_art_start_row=$(( _layout_header_rows + 2 ))
+
+        # Available space for content between header and progress bar
+        local avail_rows=$(( _layout_content_bottom - _layout_art_start_row ))
+        (( avail_rows < 0 )) && avail_rows=0
+
+        # --- Main album art sizing ---
+        # Height: up to 60% of available content rows, min 4
+        _layout_art_h=$(( avail_rows * 60 / 100 ))
+        (( _layout_art_h < 4 )) && _layout_art_h=4
+        (( _layout_art_h > avail_rows )) && _layout_art_h=$avail_rows
+
+        # Width: 2x height (terminal chars ~2:1 aspect ratio), capped to terminal
+        _layout_art_w=$(( _layout_art_h * 2 ))
+        local max_art_w=$(( cols - 2 ))
+        (( max_art_w < 4 )) && max_art_w=4
+        if (( _layout_art_w > max_art_w )); then
+            _layout_art_w=$max_art_w
+            _layout_art_h=$(( _layout_art_w / 2 ))
+            (( _layout_art_h < 4 )) && _layout_art_h=4
+        fi
+
+        # --- Determine "Up Next" panel placement ---
+        local right_space=$(( cols - _layout_art_w - 6 ))  # space to the right of art
+        local below_space=$(( _layout_content_bottom - _layout_art_start_row - _layout_art_h ))
+
+        if (( right_space >= 30 && avail_rows >= 8 )); then
+            # Side-by-side: enough horizontal AND vertical space
+            _layout_next_mode="side"
+            _layout_next_x=$(( _layout_art_w + 6 ))
+            _layout_next_y=$_layout_art_start_row
+
+            # Next art: scale to fit available side space
+            _layout_next_art_w=$(( right_space * 60 / 100 ))
+            (( _layout_next_art_w > 30 )) && _layout_next_art_w=30
+            (( _layout_next_art_w < 8 )) && _layout_next_art_w=8
+            _layout_next_art_h=$(( _layout_next_art_w / 2 ))
+            # Ensure next art doesn't overflow vertically
+            local max_next_art_h=$(( avail_rows - 8 ))  # reserve space for metadata lines
+            (( max_next_art_h < 3 )) && max_next_art_h=3
+            (( _layout_next_art_h > max_next_art_h )) && _layout_next_art_h=$max_next_art_h
+            (( _layout_next_art_h < 3 )) && _layout_next_art_h=3
+
+        elif (( below_space >= 5 && cols >= 30 )); then
+            # Stacked: show "Up Next" below the main art
+            _layout_next_mode="below"
+            _layout_next_x=3
+            _layout_next_y=$(( _layout_art_start_row + _layout_art_h + 1 ))
+
+            # Smaller art in stacked mode
+            _layout_next_art_w=$(( cols / 4 ))
+            (( _layout_next_art_w > 20 )) && _layout_next_art_w=20
+            (( _layout_next_art_w < 8 )) && _layout_next_art_w=8
+            _layout_next_art_h=$(( _layout_next_art_w / 2 ))
+            local max_below_art_h=$(( below_space - 3 ))  # room for label + art
+            (( _layout_next_art_h > max_below_art_h )) && _layout_next_art_h=$max_below_art_h
+            (( _layout_next_art_h < 3 )) && _layout_next_art_h=3
+        else
+            # Too small: hide "Up Next" entirely
+            _layout_next_mode="hidden"
+            _layout_next_art_w=0
+            _layout_next_art_h=0
+        fi
+    }
+
+    # --- cache chafa output for current cover using layout dimensions ---
+    _jukebox_cache_art() {
+        _jukebox_calc_layout
         if [[ -s "$coverfile" ]]; then
-            _jukebox_art_text=$(chafa --size "${art_w}x${art_h}" "$coverfile" 2>/dev/null)
+            _jukebox_art_text=$(chafa --size "${_layout_art_w}x${_layout_art_h}" "$coverfile" 2>/dev/null)
         else
             _jukebox_art_text=""
         fi
-        _jukebox_art_w=$art_w
+        _jukebox_art_w=$_layout_art_w
+    }
+
+    # --- cache chafa output for "Up Next" cover using layout dimensions ---
+    _jukebox_cache_next_art() {
+        if [[ "$_layout_next_mode" == "hidden" ]] || (( _layout_next_art_w < 4 || _layout_next_art_h < 2 )); then
+            _jukebox_next_art_text=""
+            return
+        fi
+        if [[ -s "$coverfile_next" ]]; then
+            _jukebox_next_art_text=$(chafa --size "${_layout_next_art_w}x${_layout_next_art_h}" "$coverfile_next" 2>/dev/null)
+        else
+            _jukebox_next_art_text=""
+        fi
     }
 
     # center helper
@@ -515,11 +633,7 @@ except Exception as e:
 
         rm -f "$coverfile_next" 2>/dev/null
         ffmpeg -y -v quiet -i "$next_file" -an -vcodec mjpeg -frames:v 1 "$coverfile_next" 2>/dev/null
-        if [[ -s "$coverfile_next" ]]; then
-            _jukebox_next_art_text=$(chafa --size 20x10 "$coverfile_next" 2>/dev/null)
-        else
-            _jukebox_next_art_text=""
-        fi
+        _jukebox_cache_next_art
 
         _jukebox_next_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
         [[ -z "$_jukebox_next_title" ]] && _jukebox_next_title="${next_file##*/}" && _jukebox_next_title="${_jukebox_next_title%.flac}"
@@ -606,9 +720,69 @@ except Exception as e:
         _jukebox_next_source=""
     }
 
+    # --- render "Up Next" panel at given position (helper for _jukebox_render) ---
+    # Args: $1=start_col, $2=start_row, $3=max_row (must not render past this), $4=max_col_width
+    _jukebox_render_next_panel() {
+        local nx=$1 ny=$2 max_y=$3 max_w=$4
+        local q_y=$ny
+
+        # Title label
+        local _title_label="📚 Up Next"
+        [[ "$_jukebox_next_source" == "queued" ]] && _title_label="📋 Queued Next"
+        (( _nav_offset > 0 )) && _title_label="$_title_label (+$_nav_offset)"
+        (( q_y > max_y )) && return
+        printf '\e[%d;%dH\e[1m%s\e[0m' "$q_y" "$nx" "$_title_label"
+        q_y=$((q_y + 2))
+
+        if [[ -n "$_jukebox_last_next_file" ]]; then
+            # Art
+            if [[ -n "$_jukebox_next_art_text" ]]; then
+                local art_lines=("${(@f)_jukebox_next_art_text}")
+                for l in "${art_lines[@]}"; do
+                    (( q_y > max_y )) && break
+                    printf '\e[%d;%dH%s' "$q_y" "$nx" "$l"
+                    q_y=$((q_y + 1))
+                done
+            fi
+
+            q_y=$((q_y + 1))
+            local max_len=$((max_w - 2))
+            (( max_len < 10 )) && max_len=10
+
+            # Metadata lines — each guarded by vertical bounds
+            local _meta_lines=()
+            _meta_lines+=("Title: ${_jukebox_next_title:-Unknown}")
+            _meta_lines+=("Artist: ${_jukebox_next_artist:-Unknown}")
+            local _t_album="Album: ${_jukebox_next_album:-None}"
+            [[ -n "$_jukebox_next_date" ]] && _t_album="$_t_album (${_jukebox_next_date})"
+            _meta_lines+=("$_t_album")
+            [[ -n "$_jukebox_next_dur" ]] && _meta_lines+=("Length: $_jukebox_next_dur")
+            [[ -n "$_jukebox_next_quality" ]] && _meta_lines+=("Quality: $_jukebox_next_quality")
+            [[ -n "$_jukebox_next_size" ]] && _meta_lines+=("Size: $_jukebox_next_size")
+            [[ -n "$_jukebox_next_genre" ]] && _meta_lines+=("Genre: $_jukebox_next_genre")
+
+            for ml in "${_meta_lines[@]}"; do
+                (( q_y > max_y )) && break
+                (( ${#ml} > max_len )) && ml="${ml[1,$((max_len - 3))]}..."
+                printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$nx" "$ml"
+                q_y=$((q_y + 1))
+            done
+        else
+            # Loading or end-of-playlist message
+            (( q_y <= max_y )) && {
+                local next_idx=$((_render_pl_pos + 1 + _nav_offset))
+                if (( next_idx < _render_pl_count )); then
+                    printf '\e[%d;%dH\e[2m⏳ Loading...\e[0m' "$q_y" "$nx"
+                else
+                    printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$nx"
+                fi
+            }
+        fi
+    }
+
     # --- render screen (pure display — all data pre-fetched by main loop) ---
     _jukebox_render() {
-        local cols=$(tput cols) rows=$(tput lines)
+        local cols=$_layout_cols rows=$_layout_rows
 
         [[ -z "$_render_path" ]] && return
 
@@ -641,8 +815,6 @@ except Exception as e:
             bar=" [$(printf '━%.0s' {1..$filled} 2>/dev/null)$(printf '─%.0s' {1..$empty} 2>/dev/null)]"
         fi
 
-        local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  []=speed"
-        local controls2="A=add next  L=queue  j/k=nav next  ENTER=play nav  q=quit"
         local info="♫  $title"
         [[ -n "$artist" ]] && info="$info  —  $artist"
         local track_info="[$((pl_pos + 1)) / $pl_count]"
@@ -656,111 +828,59 @@ except Exception as e:
         # Disable auto-wrap, clear screen, hide cursor
         printf '\e[?7l\e[2J\e[?25l'
 
-        # row 1 & 2: controls (dim)
-        printf '\e[1;1H\e[2m'
-        _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
-        printf '\e[2;1H'
-        _jukebox_padline "$(_jukebox_center "$controls2" $cols)" $cols
-        printf '\e[0m'
-
-        # row 3: song info
-        printf '\e[3;1H'
-        _jukebox_padline "$(_jukebox_center "$info" $cols)" $cols
-
-        # row 4: album (or blank)
-        printf '\e[4;1H'
-        if [[ -n "$album" ]]; then
-            _jukebox_padline "$(_jukebox_center "💿 $album" $cols)" $cols
-        fi
-
-        # row 5: track position
-        printf '\e[5;1H'
-        _jukebox_padline "$(_jukebox_center "$track_info" $cols)" $cols
-
-        # album art (kitty graphics — start at row 7)
-        local _art_line_count=0
-        if [[ -n "$_jukebox_art_text" ]]; then
-            printf '\e[7;1H%s' "$_jukebox_art_text"
-        fi
-
-        # Coming Up Next panel (pure display from pre-fetched _jukebox_next_* vars)
-        if [[ -n "$pl_pos" ]]; then
-            local art_w_est=${_jukebox_art_w:-10}
-            local queue_x=$(( art_w_est + 8 ))
-
-            if (( cols - queue_x > 25 )); then
-                local q_y=7
-                local _title_label="🎵 Coming Up Next"
-                [[ "$_jukebox_next_source" == "queued" ]] && _title_label="📋 Queued Next"
-                [[ "$_jukebox_next_source" == "library" ]] && _title_label="📚 Up Next"
-                (( _nav_offset > 0 )) && _title_label="$_title_label (+$_nav_offset)"
-                printf '\e[%d;%dH\e[1m%s\e[0m' "$q_y" "$queue_x" "$_title_label"
-                q_y=$((q_y + 2))
-
-                if [[ -n "$_jukebox_last_next_file" ]]; then
-                    if [[ -n "$_jukebox_next_art_text" ]]; then
-                        local start_q_y=$q_y
-                        local art_lines=("${(@f)_jukebox_next_art_text}")
-                        for l in "${art_lines[@]}"; do
-                            printf '\e[%d;%dH%s' "$q_y" "$queue_x" "$l"
-                            q_y=$((q_y + 1))
-                        done
-                        # Kitty/Sixel outputs 1 line but visually extends.
-                        # We used --size 20x10. Ensure the cursor passes the image.
-                        local printed_lines=$(( q_y - start_q_y ))
-                        if (( printed_lines < 10 )); then
-                            q_y=$(( start_q_y + 10 ))
-                        fi
-                    fi
-
-                    q_y=$((q_y + 1))
-                    local max_len=$(( cols - queue_x - 2 ))
-
-                    local t_title="Title: ${_jukebox_next_title:-Unknown}"
-                    (( ${#t_title} > max_len )) && t_title="${t_title[1,$((max_len - 3))]}..."
-                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_title"; q_y=$((q_y + 1))
-
-                    local t_artist="Artist: ${_jukebox_next_artist:-Unknown}"
-                    (( ${#t_artist} > max_len )) && t_artist="${t_artist[1,$((max_len - 3))]}..."
-                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_artist"; q_y=$((q_y + 1))
-
-                    local t_album="Album: ${_jukebox_next_album:-None}"
-                    [[ -n "$_jukebox_next_date" ]] && t_album="$t_album (${_jukebox_next_date})"
-                    (( ${#t_album} > max_len )) && t_album="${t_album[1,$((max_len - 3))]}..."
-                    printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_album"; q_y=$((q_y + 1))
-
-                    if [[ -n "$_jukebox_next_dur" ]]; then
-                        local t_dur="Length: $_jukebox_next_dur"
-                        (( ${#t_dur} > max_len )) && t_dur="${t_dur[1,$((max_len - 3))]}..."
-                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_dur"; q_y=$((q_y + 1))
-                    fi
-
-                    if [[ -n "$_jukebox_next_quality" ]]; then
-                        local t_quality="Quality: $_jukebox_next_quality"
-                        (( ${#t_quality} > max_len )) && t_quality="${t_quality[1,$((max_len - 3))]}..."
-                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_quality"; q_y=$((q_y + 1))
-                    fi
-
-                    if [[ -n "$_jukebox_next_size" ]]; then
-                        local t_size="Size: $_jukebox_next_size"
-                        (( ${#t_size} > max_len )) && t_size="${t_size[1,$((max_len - 3))]}..."
-                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_size"; q_y=$((q_y + 1))
-                    fi
-
-                    if [[ -n "$_jukebox_next_genre" ]]; then
-                        local t_genre="Genre: $_jukebox_next_genre"
-                        (( ${#t_genre} > max_len )) && t_genre="${t_genre[1,$((max_len - 3))]}..."
-                        printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$queue_x" "$t_genre"; q_y=$((q_y + 1))
-                    fi
-                else
-                    local next_idx=$((pl_pos + 1 + _nav_offset))
-                    if (( next_idx < pl_count )); then
-                        printf '\e[%d;%dH\e[2m⏳ Loading...\e[0m' "$q_y" "$queue_x"
-                    else
-                        printf '\e[%d;%dH\e[2mEnd of playlist\e[0m' "$q_y" "$queue_x"
-                    fi
-                fi
+        # --- Adaptive Header ---
+        local cur_row=1
+        if [[ "$_layout_mode" == "normal" ]]; then
+            # Full header: 2 control lines + info + album + track
+            local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  []=speed"
+            local controls2="A=add next  L=queue  j/k=nav next  ENTER=play nav  q=quit"
+            printf '\e[1;1H\e[2m'
+            _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
+            printf '\e[2;1H'
+            _jukebox_padline "$(_jukebox_center "$controls2" $cols)" $cols
+            printf '\e[0m'
+            printf '\e[3;1H'
+            _jukebox_padline "$(_jukebox_center "$info" $cols)" $cols
+            printf '\e[4;1H'
+            if [[ -n "$album" ]]; then
+                _jukebox_padline "$(_jukebox_center "💿 $album" $cols)" $cols
             fi
+            printf '\e[5;1H'
+            _jukebox_padline "$(_jukebox_center "$track_info" $cols)" $cols
+            cur_row=6
+
+        elif [[ "$_layout_mode" == "compact" ]]; then
+            # Compact: 1 control line + info with track
+            local controls_compact="A=add next  L=queue  j/k=nav  ENTER=play  q=quit"
+            printf '\e[1;1H\e[2m'
+            _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
+            printf '\e[0m'
+            printf '\e[2;1H'
+            _jukebox_padline "$(_jukebox_center "$info  $track_info" $cols)" $cols
+            if [[ -n "$album" ]]; then
+                printf '\e[3;1H'
+                _jukebox_padline "$(_jukebox_center "💿 $album" $cols)" $cols
+            fi
+            cur_row=4
+
+        else  # minimal
+            # Minimal: song title + track only, single line
+            local mini_info="$info  $track_info"
+            printf '\e[1;1H'
+            _jukebox_padline "$(_jukebox_center "$mini_info" $cols)" $cols
+            cur_row=2
+        fi
+
+        # --- Album art (positioned by layout engine) ---
+        if [[ -n "$_jukebox_art_text" ]]; then
+            printf '\e[%d;1H%s' "$_layout_art_start_row" "$_jukebox_art_text"
+        fi
+
+        # --- "Up Next" panel (layout-driven placement with bounds) ---
+        if [[ -n "$pl_pos" && "$_layout_next_mode" != "hidden" ]]; then
+            local panel_max_y=$(( rows - 1 ))   # never overwrite progress bar
+            local panel_max_w=$(( cols - _layout_next_x - 1 ))
+            _jukebox_render_next_panel "$_layout_next_x" "$_layout_next_y" "$panel_max_y" "$panel_max_w"
         fi
 
         # progress at bottom
@@ -770,6 +890,7 @@ except Exception as e:
         # restore auto-wrap, end sync
         printf '\e[?7h\e[?2026l'
     }
+
 
     # --- add to queue (Spotify style / play next) ---
     _jukebox_add_next() {
@@ -786,18 +907,15 @@ except Exception as e:
 ─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
         fi
 
-        # default list: sorted by title if cache ready, else by filename
+        # default list: setup using shared helper
+        local tmp_files=("$musicdir"/**/*.flac(N.on))
         local input_list
-        if [[ -s "$cachefile" ]]; then
-            input_list=$(sort -t$'\t' -k2 -f "$cachefile" | cut -f1)
-        else
-            local tmp_files=("$musicdir"/**/*.flac(N.on))
-            input_list=$(printf '%s\n' "${tmp_files[@]}")
-        fi
+        input_list=$(_jukebox_get_input_list "${tmp_files[@]}")
 
         local selected
         selected=$(echo "$input_list" | \
             fzf --multi \
+                --delimiter=$'\t' --with-nth=2 \
                 --prompt="Add Next: " \
                 --header="$fzf_header" \
                 --marker="✔ " \
@@ -813,7 +931,7 @@ except Exception as e:
 
         [[ -z "$selected" ]] && return
 
-        local files_to_add=("${(@f)${selected}}")
+        local files_to_add=("${(@f)${$(echo "$selected" | cut -f1)}}")
         (( ${#files_to_add[@]} == 0 )) && return
 
         local pl_pos=$(_jukebox_fast_get "playlist-pos")
@@ -1011,6 +1129,8 @@ DELEOF
     if [[ -n "$_render_path" ]]; then
         _jukebox_extract_art "$_render_path"
         _jukebox_cache_art
+    else
+        _jukebox_calc_layout    # ensure layout vars exist even without a track
     fi
     _jukebox_render
 
@@ -1096,7 +1216,8 @@ DELEOF
         new_rows=$(tput lines)
         if [[ "$new_cols" != "$last_cols" || "$new_rows" != "$last_rows" ]]; then
             last_cols=$new_cols; last_rows=$new_rows
-            _jukebox_cache_art
+            _jukebox_cache_art          # re-calculates layout + re-caches current art
+            _jukebox_cache_next_art     # re-cache "Up Next" art at new dimensions
             force_redraw=1
         fi
 
