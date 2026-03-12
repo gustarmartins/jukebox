@@ -16,30 +16,10 @@
 # ╚══════════════════════════════════════════════════════════════════╝
 
 : ${JUKEBOX_MUSIC_DIR:="$HOME/Music"}
+_JUKEBOX_SCRIPT_DIR="${0:A:h}"
 
-# --- fzf preview script (metadata + album art) ---
-_jukebox_fzf_preview='
-    tmpcover="$_JUKEBOX_PREVTMP"
-    title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
-    artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
-    album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
-    duration=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 -- "{1}" 2>/dev/null)
-    if [[ -n "$duration" ]]; then
-        dur_int=${duration%.*}
-        mins=$((dur_int / 60))
-        secs=$((dur_int % 60))
-        dur_fmt=$(printf "%d:%02d" "$mins" "$secs")
-    fi
-    fname="{1}"; fname=${fname##*/}; fname=${fname%.flac}
-    echo "🎵 ${title:-$fname}"
-    [[ -n "$artist" ]] && echo "🎤 $artist"
-    [[ -n "$album" ]]  && echo "💿 $album"
-    [[ -n "$dur_fmt" ]] && echo "⏱  $dur_fmt"
-    echo ""
-    if ffmpeg -y -v quiet -i "{1}" -an -vcodec mjpeg -frames:v 1 "$tmpcover" 2>/dev/null && [[ -s "$tmpcover" ]]; then
-        chafa --size 40x20 "$tmpcover" 2>/dev/null
-    fi
-'
+# --- fzf preview command (calls external Python script) ---
+_jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
 
 # --- main function ---
 jukebox() {
@@ -83,6 +63,7 @@ jukebox() {
         return 1
     fi
     export _JUKEBOX_PYTHON
+    export _JUKEBOX_SCRIPT_DIR
 
     local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
     local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
