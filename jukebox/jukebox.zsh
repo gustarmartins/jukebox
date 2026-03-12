@@ -221,7 +221,8 @@ SORTEOF
             local fzf_header="TAB=toggle  ENTER=play/queue  ESC=cancel"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
-─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
             fi
 
             local input_list
@@ -285,7 +286,8 @@ SORTEOF
             local fzf_header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
-─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
             fi
             
             local input_list
@@ -919,7 +921,8 @@ except Exception as e:
 
         if [[ -s "$cachefile" ]]; then
             fzf_header="$fzf_header
-─── Sort: Alt-T/A/B/D/L (asc) | Shift+Alt-T/A/B/D/L (desc) ───"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
         fi
 
         # default list: setup using shared helper
