@@ -353,7 +353,7 @@ SORTEOF
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_log _jukebox_cleanup _jukebox_setup_fzf_sort 2>/dev/null
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_log _jukebox_cleanup _jukebox_setup_fzf_sort 2>/dev/null
     }
     setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM EXIT
@@ -479,7 +479,6 @@ except Exception as e:
         ffmpeg -y -v quiet -i "$filepath" -an -vcodec mjpeg -frames:v 1 "$coverfile" 2>/dev/null
     }
 
-    # --- cache chafa output for current cover ---
     # --- layout engine: computes all dimensions from terminal size ---
     # Sets: _layout_mode (normal|compact|minimal)
     #       _layout_header_rows, _layout_art_start_row
@@ -593,7 +592,6 @@ except Exception as e:
         else
             _jukebox_art_text=""
         fi
-        _jukebox_art_w=$_layout_art_w
     }
 
     # --- cache chafa output for "Up Next" cover using layout dimensions ---
@@ -1017,10 +1015,28 @@ cur_pos=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.load
 # Parse all entries (include id)
 entries=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print("\n".join(f"{str(x.get(\"current\", False)).lower()}\t{i}\t{x.get(\"filename\",\"\")}\t{x.get(\"id\",\"\")}" for i, x in enumerate(d)))' 2>/dev/null)
 
+# Resolve display name from cache or fall back to filename
+resolve_name() {
+    local fp="$1"
+    if (( _JUKEBOX_SHOW_FORMATNAMES )) && [[ -s "$_JUKEBOX_CACHE" ]]; then
+        local cached
+        cached=$(grep -F "$fp" "$_JUKEBOX_CACHE" | head -n 1)
+        if [[ -n "$cached" ]]; then
+            local title artist
+            title=$(echo "$cached" | cut -f2)
+            artist=$(echo "$cached" | cut -f3)
+            echo "${title} - ${artist}"
+            return
+        fi
+    fi
+    local name="${fp##*/}"; name="${name%.flac}"
+    echo "$name"
+}
+
 # --- Now Playing ---
 while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" == "true" ]]; then
-        name="${fp##*/}"; name="${name%.flac}"
+        name=$(resolve_name "$fp")
         echo "▶ $((idx + 1))) $name"
     fi
 done <<< "$entries"
@@ -1031,7 +1047,7 @@ queue_count=0
 while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
         if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]] && grep -qxF "$item_id" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
-            name="${fp##*/}"; name="${name%.flac}"
+            name=$(resolve_name "$fp")
             queue_output+="♫ $((idx + 1))) $name"$'\n'
             queue_count=$((queue_count + 1))
         fi
@@ -1049,7 +1065,7 @@ library_count=0
 while IFS=$'\t' read -r is_current idx fp item_id; do
     if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
         if [[ -z "$item_id" ]] || ! [[ -f "$_JUKEBOX_QUEUEFILE" ]] || ! grep -qxF "$item_id" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
-            name="${fp##*/}"; name="${name%.flac}"
+            name=$(resolve_name "$fp")
             library_output+="  $((idx + 1))) $name"$'\n'
             library_count=$((library_count + 1))
         fi
