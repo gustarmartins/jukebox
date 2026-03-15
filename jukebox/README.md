@@ -123,6 +123,11 @@ Run `jukebox` and pick a mode:
 - **FLAC files only** — scans for `*.flac` files in your music directory.
 - Album art is extracted from embedded metadata (most FLAC files have it).
 
+### Known Limits
+Because Jukebox runs natively in Zsh without a heavy backend, it is subject to certain shell and OS-level limits when scanning massive libraries:
+- **The Patience Limit (~3,000 to 5,000 files)**: Jukebox spawns an `ffprobe` subprocess for every file to build the metadata cache for sorting and fzf previews. Extracting metadata for 5,000 files takes roughly 50-100 seconds sequentially. It won't crash, but startup for the `Browse` or `Queue` menus will be noticeably slow.
+- **The OS `ARG_MAX` Limit (~30,000 to 40,000 files)**: Jukebox expands glob patterns directly in the shell (e.g., `**/*.flac`). If a library contains tens of thousands of files, the resulting string of absolute file paths will exceed the Linux kernel's `ARG_MAX` limit (typically ~2MB), causing the shell to crash with a `zsh: argument list too long` error before Jukebox can even start.
+
 ## License
 
 Do whatever you want with it. 🎶

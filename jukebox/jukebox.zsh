@@ -23,6 +23,9 @@ _jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
 
 # --- main function ---
 jukebox() {
+    # Suppress zsh job control messages ("+ done" etc) for background tasks
+    setopt localoptions nomonitor
+
     local _jukebox_debug=0
     local _jukebox_debuglog="/tmp/jukebox-debug.log"
     local _jukebox_show_formatnames=1
@@ -49,6 +52,25 @@ jukebox() {
                 ;;
         esac
     done
+
+    # --- clean up orphaned files from previous crashed sessions ---
+    # Runs on every launch as a safety net for scenarios where exit
+    # cleanup cannot fire (SIGKILL, terminal crash, compositor restart,
+    # OOM-kill, power loss, etc.)
+    if pgrep -f 'input-ipc-server=.*jukebox-mpv' >/dev/null 2>&1; then
+        pkill -f 'input-ipc-server=.*jukebox-mpv' 2>/dev/null
+        sleep 0.2
+        pkill -9 -f 'input-ipc-server=.*jukebox-mpv' 2>/dev/null
+    fi
+    rm -f /tmp/jukebox-cover-*.jpg(N) /tmp/jukebox-cover-next-*.jpg(N) 2>/dev/null
+    rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
+    rm -f /tmp/jukebox-queue-*.txt(N) /tmp/jukebox-meta-*.tsv(N) 2>/dev/null
+    rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
+    rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
+    rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
+    rm -f "${XDG_RUNTIME_DIR:-/tmp}"/jukebox-mpv-*.sock(N) 2>/dev/null
+    unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
+          _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
 
 
     _jukebox_log() {
@@ -79,6 +101,9 @@ jukebox() {
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
 
+    # TODO: Performance optimization needed for massive directories (e.g., 10,000+ MP3s).
+    # Currently, launching a new ffprobe subprocess for every file scales poorly for 
+    # extremely large non-lossless libraries.
     # --- build metadata cache in background for sorting ---
     "$_JUKEBOX_PYTHON" -c "
 import subprocess, json, os, sys
@@ -112,9 +137,11 @@ out.close()
         fi
 
         _fzf_sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
+        local sort_state_file="/tmp/jukebox-sort-state-$$"
         _gen_sort() {
             cat > "$_fzf_sort_dir/$2.sh" << SORTEOF
 #!/usr/bin/env bash
+echo "$2" > "$sort_state_file"
 if (( \$_JUKEBOX_SHOW_FORMATNAMES )); then
     $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s - %s\\n", \$1, \$2, \$3 }'
 else
@@ -199,7 +226,7 @@ SORTEOF
             
             _jukebox_setup_fzf_sort
             
-            local fzf_header="TAB=toggle  ENTER=play/queue  ESC=cancel"
+            local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
 ─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
@@ -209,8 +236,15 @@ SORTEOF
             local input_list
             input_list=$(_jukebox_get_input_list "${all_files[@]}")
 
-            local selected
-            selected=$(echo "$input_list" | \
+            # Overwrite all_files with the exact visual order presented to fzf
+            # (Because _jukebox_get_input_list sorts by title from cache)
+            local visual_paths
+            visual_paths=$(echo "$input_list" | cut -f1)
+            all_files=("${(@f)visual_paths}")
+
+            local output
+            echo "default" > "/tmp/jukebox-sort-state-$$"
+            output=$(echo "$input_list" | \
                 fzf --multi \
                     --delimiter=$'\t' --with-nth=2 \
                     --prompt="Pick start song(s): " \
@@ -218,10 +252,25 @@ SORTEOF
                     --marker="✔ " \
                     --preview "$_jukebox_fzf_preview" \
                     --preview-window=right:50% \
+                    --expect=enter,alt-s \
                     "${_fzf_binds[@]}")
                     
             rm -rf "$_fzf_sort_dir"
+            [[ -z "$output" ]] && return
+            
+            local key_pressed=$(echo "$output" | head -n 1)
+            local selected=$(echo "$output" | sed '1d')
             [[ -z "$selected" ]] && return
+            
+            # Reconstruct the true visual order if the user changed the sort
+            local current_sort
+            current_sort=$(cat "/tmp/jukebox-sort-state-$$" 2>/dev/null)
+            if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
+                # Re-run the exact sort script to get the ordered file list
+                local sorted_paths
+                sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
+                all_files=("${(@f)sorted_paths}")
+            fi
             
             # Extract first column (filepath)
             local picked_arr=("${(@f)${$(echo "$selected" | cut -f1)}}")
@@ -235,12 +284,24 @@ SORTEOF
             if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
                 local -A seen
                 for x in "${picked_arr[@]}"; do seen[$x]=1; done
+                local remaining_files=()
                 for ((i=last_idx+1; i<=${#all_files[@]}; i++)); do
                     local f="${all_files[$i]}"
                     if [[ -z "${seen[$f]}" ]]; then
-                        files+=("$f")
+                        remaining_files+=("$f")
                     fi
                 done
+                
+                if [[ "$key_pressed" == "alt-s" ]]; then
+                    local r_i r_j r_tmp_val
+                    for ((r_i=${#remaining_files[@]}; r_i>1; r_i--)); do
+                        r_j=$((RANDOM % r_i + 1))
+                        r_tmp_val="${remaining_files[$r_i]}"
+                        remaining_files[$r_i]="${remaining_files[$r_j]}"
+                        remaining_files[$r_j]="$r_tmp_val"
+                    done
+                fi
+                files+=("${remaining_files[@]}")
             fi
             start_idx=0
             ;;
@@ -316,9 +377,12 @@ SORTEOF
 
     # cleanup handler (idempotent — safe to call multiple times)
     _jukebox_cleanup() {
+        trap - INT TERM HUP QUIT PIPE EXIT 2>/dev/null
         [[ -n "$_jukebox_cleaned" ]] && return
         _jukebox_cleaned=1
         _jukebox_log "cleanup: starting"
+        # Clear Kitty graphics protocol images before leaving altscreen
+        printf '\e_Ga=d;\e\\'
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
         if [[ -n "$_jukebox_mpv_pid" ]] && kill -0 "$_jukebox_mpv_pid" 2>/dev/null; then
@@ -329,23 +393,31 @@ SORTEOF
             kill -9 "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
+        # Remove session-specific temp files
         rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
+        rm -f "/tmp/jukebox-sort-state-$$"
         rm -rf "$_fzf_sort_dir"
+        # Remove log files that accumulate across sessions
+        rm -f /tmp/jukebox-py.log /tmp/jukebox-debug.log 2>/dev/null
+        # Unset exported env vars so they don't leak into the next session
+        unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
+              _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
         unfunction _jukebox_render _jukebox_render_next_panel _jukebox_ipc \
                    _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_log _jukebox_cleanup _jukebox_setup_fzf_sort 2>/dev/null
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_log _jukebox_setup_fzf_sort 2>/dev/null
     }
     setopt localoptions localtraps
-    trap _jukebox_cleanup INT TERM EXIT
+    trap _jukebox_cleanup INT TERM HUP QUIT PIPE EXIT
 
     # start mpv in background with IPC socket, fully headless
     _jukebox_log "mpv: starting with playlist=$playlist sock=$mpvsock start_idx=$start_idx"
     mpv --no-video --no-terminal \
         --audio-format=s32 \
         --audio-samplerate=0 \
+        --keep-open=no \
         --playlist="$playlist" \
         --playlist-start="$start_idx" \
         --input-ipc-server="$mpvsock" &
