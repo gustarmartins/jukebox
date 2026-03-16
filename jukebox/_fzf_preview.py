@@ -2,10 +2,10 @@
 """fzf preview script for Jukebox — shows album art + comprehensive metadata."""
 import subprocess, json, os, sys
 
-def run(cmd, **kw):
+def run(cmd, strip=True, **kw):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, **kw)
-        return r.stdout.strip()
+        return r.stdout.strip() if strip else r.stdout
     except Exception:
         return ""
 
@@ -69,12 +69,13 @@ def main():
         except json.JSONDecodeError:
             pass
 
-    fmt = data.get("format", {})
-    tags = fmt.get("tags", {})
+    fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+    tags = fmt.get("tags") if isinstance(fmt.get("tags"), dict) else {}
 
     # Case-insensitive tag getter
     def tag(k):
-        return tags.get(k, tags.get(k.upper(), tags.get(k.lower(), "")))
+        val = tags.get(k, tags.get(k.upper(), tags.get(k.lower(), "")))
+        return str(val) if val is not None else ""
 
     # Find audio stream
     audio_stream = None
@@ -112,8 +113,10 @@ def main():
     bit_depth = ""
     channels = ""
     channel_layout = ""
-    if audio_stream:
-        codec = audio_stream.get("codec_name", "").upper()
+    if isinstance(audio_stream, dict):
+        codec = audio_stream.get("codec_name", "")
+        if codec:
+            codec = codec.upper()
         sample_rate = audio_stream.get("sample_rate", "")
         bit_depth = audio_stream.get("bits_per_raw_sample", "") or ""
         if bit_depth == "0":
@@ -139,11 +142,13 @@ def main():
 
     sep = "─" * min(cols - 2, 50)
 
-    # --- Print header metadata ---
+    header_lines_count = [0]
+
     def printline(s):
         if len(s) > cols:
             s = s[:cols - 3] + "..."
         print(s)
+        header_lines_count[0] += 1
 
     printline(f"🎵 {title}")
     if artist:
@@ -168,15 +173,23 @@ def main():
 
     # --- Album art (responsive to window size) ---
     art_w = max(cols - 2, 8)
-    # Reserve lines: header ~4, art, then metadata below
-    if detail == "compact":
-        art_h = max(lines - 6, 3)
-    elif detail == "normal":
-        art_h = max(min(art_w // 2, lines - 14), 4)
-    else:
-        art_h = max(min(art_w // 2, lines - 20), 5)
 
-    if art_h >= 3 and art_w >= 8:
+    # Dynamically compute art height from remaining space:
+    #   total lines - header lines printed - 1 (gap line before art)
+    #   - lines reserved for metadata sections below the art
+    if detail == "compact":
+        metadata_reserve = 1
+    elif detail == "normal":
+        metadata_reserve = 8
+    else:
+        metadata_reserve = 14
+
+    remaining = lines - header_lines_count[0] - 1 - metadata_reserve
+    art_h = min(art_w // 2, remaining)
+    # Enforce sensible bounds
+    art_h = max(art_h, 3)
+
+    if art_h >= 3 and art_w >= 8 and remaining >= 3:
         print()
         try:
             subprocess.run(
@@ -191,9 +204,16 @@ def main():
                     shutil.copy(fallback, tmpcover)
             
             if os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0:
-                art_out = run(["chafa", "--size", f"{art_w}x{art_h}", tmpcover])
+                art_out = run(["chafa", "--size", f"{art_w}x{art_h}", tmpcover], strip=False)
                 if art_out:
-                    print(art_out)
+                    print(art_out, end="")
+                    # If chafa output an image overlay (Kitty/Sixel) instead of block characters,
+                    # it might not emit enough newlines. We must pad with newlines so fzf
+                    # advances its line counter and doesn't draw text over the image.
+                    newlines_in_art = art_out.count("\n")
+                    # some overhead newlines from chafa might exist, but we want at least art_h total lines
+                    if newlines_in_art < art_h:
+                        print("\n" * (art_h - newlines_in_art), end="")
         except Exception:
             pass
 
