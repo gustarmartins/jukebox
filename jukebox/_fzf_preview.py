@@ -101,6 +101,8 @@ def main():
     performer = tag("performer") or ""
     copyright_tag = tag("copyright") or ""
     label = tag("label") or tag("organization") or tag("publisher") or ""
+    remixer = tag("remixer") or tag("mixartist") or ""
+    arranger = tag("arranger") or ""
     lyrics = tag("lyrics") or tag("LYRICS") or tag("unsyncedlyrics") or ""
 
     duration = fmt.get("duration", "")
@@ -247,7 +249,7 @@ def main():
         printline("  " + "  │  ".join(extra))
 
     if detail == "normal" and not any([album_artist and album_artist != artist,
-                                        genre, composer, performer]):
+                                        genre, composer, performer, remixer, arranger]):
         return
 
     # --- Details section ---
@@ -261,6 +263,10 @@ def main():
         printline(f"  Composer: {composer}")
     if performer:
         printline(f"  Performer: {performer}")
+    if remixer:
+        printline(f"  Remixer: {remixer}")
+    if arranger:
+        printline(f"  Arranger: {arranger}")
     if label:
         printline(f"  Label: {label}")
     if copyright_tag:
