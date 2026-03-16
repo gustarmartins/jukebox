@@ -1330,11 +1330,15 @@ DELEOF
                     fi
                     ;;
                 $'\n'|$'\r')
-                    local cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((_render_pl_pos + 1 + _nav_offset))")
-                    _jukebox_set "$cmd"
-                    _nav_offset=0
-                    _jukebox_last_next_file=""
-                    force_redraw=1
+                    if (( _nav_offset == 0 )); then
+                        _jukebox_set '{"command":["set_property","pause",false]}'
+                    else
+                        local cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((_render_pl_pos + 1 + _nav_offset))")
+                        _jukebox_set "$cmd"
+                        _nav_offset=0
+                        _jukebox_last_next_file=""
+                        force_redraw=1
+                    fi
                     ;;
                 'a'|'A')
                     _jukebox_add_next
