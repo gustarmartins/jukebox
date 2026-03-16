@@ -3,8 +3,9 @@
 # ║  🎵 Jukebox — Terminal FLAC Player                             ║
 # ║  A zsh function that plays FLAC files with album art,          ║
 # ║  queue building, fzf browsing, and interactive controls.       ║
+# ║  Also includes a `nightcore` command for speed/pitch remixing. ║
 # ║                                                                ║
-# ║  Dependencies: mpv, fzf, chafa, ffmpeg, socat, jq              ║
+# ║  Dependencies: mpv, fzf, chafa, ffmpeg, socat, jq, sox         ║
 # ║                                                                ║
 # ║  Setup: Add this line to your ~/.zshrc:                        ║
 # ║    source ~/Jukebox/jukebox/jukebox.zsh                        ║
@@ -272,9 +273,10 @@ SORTEOF
     echo "  6) Browse & pick (plays from selection onward)"
     echo "  7) Shuffle"
     echo "  8) Build queue (TAB to pick, ENTER to play)"
+    echo "  9) Create Nightcore Edit (speed+pitch)"
     echo "  q) Quit"
     echo ""
-    read "choice?Choose [1-8, q]: "
+    read "choice?Choose [1-9, q]: "
 
     case "$choice" in
         1) files=("$musicdir"/**/*.flac(N.)) ;;
@@ -424,6 +426,83 @@ SORTEOF
                 n=$((n + 1))
             done
             start_idx=0
+            ;;
+        9)
+            if ! command -v sox >/dev/null 2>&1; then
+                echo "❌ Error: 'sox' is not installed. Please install it (e.g. pacman -S sox) to create Nightcore edits."
+                return 1
+            fi
+            
+            local all_files=("$musicdir"/**/*.flac(N.on))
+            if [[ ${#all_files[@]} -eq 0 ]]; then
+                echo "No FLAC files found in $musicdir"
+                return 1
+            fi
+            
+            _jukebox_setup_fzf_sort
+            local fzf_header="ENTER=select song to nightcore-ify  ESC=cancel"
+            if [[ -s "$cachefile" ]]; then
+                fzf_header="$fzf_header
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+            fi
+            
+            local input_list
+            input_list=$(_jukebox_get_input_list "${all_files[@]}")
+            local selected
+            selected=$(echo "$input_list" | \
+                fzf \
+                    --delimiter=$'\t' --with-nth=2 \
+                    --prompt="Select for Nightcore Edit: " \
+                    --header="$fzf_header" \
+                    --preview "$_jukebox_fzf_preview" \
+                    --preview-window=right:50% \
+                    "${_fzf_binds[@]}")
+                    
+            rm -rf "$_fzf_sort_dir"
+            [[ -z "$selected" ]] && return
+            local target_file="${selected%%$'\t'*}"
+            
+            echo ""
+            read "speed?Multiplier (e.g. 1.25 for 25% faster track and higher pitch) [1.25]: "
+            speed=${speed:-1.25}
+            
+            local original_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
+            [[ -z "$original_title" ]] && original_title="${${target_file##*/}%.flac}"
+            
+            local out_title="${original_title} (Nightcore)"
+            local out_file="${target_file%.flac} (Nightcore).flac"
+            
+            if [[ -f "$out_file" ]]; then
+                read "overwrite?File already exists. Overwrite? [y/N]: "
+                if [[ "$overwrite" != "y" && "$overwrite" != "Y" ]]; then
+                    echo "Aborted."
+                    return 0
+                fi
+            fi
+            
+            echo -n "✨ Generating Nightcore edit... "
+            if sox "$target_file" "$out_file" speed "$speed" 2>/dev/null; then
+                # optional: apply tags so it looks right in jukebox
+                local original_artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
+                local original_album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
+                # Not embedding the art yet to save an extra ffmpeg pass, but setting basic title tags
+                if command -v ffmpeg >/dev/null 2>&1; then
+                    local tmp_tag="/tmp/jukebox-tag-$$.flac"
+                    ffmpeg -v quiet -y -i "$out_file" -c copy \
+                           -metadata title="$out_title" \
+                           -metadata artist="${original_artist:-Unknown}" \
+                           -metadata album="${original_album:-Unknown}" \
+                           "$tmp_tag" 2>/dev/null
+                    [[ -f "$tmp_tag" ]] && mv "$tmp_tag" "$out_file"
+                fi
+                echo "Done!"
+                files=("$out_file")
+                start_idx=0
+            else
+                echo "Failed to process audio with sox."
+                return 1
+            fi
             ;;
         q|Q) return ;;
         *) echo "Invalid choice"; return 1 ;;
@@ -1490,4 +1569,330 @@ DELEOF
         sleep 0.05
     done
     _jukebox_cleanup
+}
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  🌙 Nightcore — FLAC Speed/Pitch Remixer                       ║
+# ║  A zsh function that creates nightcore mixes from FLAC files.   ║
+# ║                                                                 ║
+# ║  Dependencies: sox, ffmpeg, fzf                                 ║
+# ║                                                                 ║
+# ║  Usage:                                                         ║
+# ║    nightcore                  — interactive file picker          ║
+# ║    nightcore <file.flac>      — nightcore a specific file        ║
+# ║    nightcore --speed 1.3      — set speed multiplier             ║
+# ║    nightcore --gain -2        — set gain adjustment (dB)         ║
+# ║    nightcore --preview        — audition 15s snippet first       ║
+# ║    nightcore --output <path>  — custom output path               ║
+# ╚══════════════════════════════════════════════════════════════════╝
+nightcore() {
+    local _nc_speed=""
+    local _nc_gain=""
+    local _nc_input=""
+    local _nc_output=""
+    local _nc_preview=0
+    local _nc_suffix="Nightcore Mix"
+    local _nc_musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
+    local _nc_script_dir="${_JUKEBOX_SCRIPT_DIR:-${0:A:h}}"
+
+    # ── parse arguments ──────────────────────────────────────────
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --speed|-s)
+                _nc_speed="$2"; shift 2 ;;
+            --gain|-g)
+                _nc_gain="$2"; shift 2 ;;
+            --output|-o)
+                _nc_output="$2"; shift 2 ;;
+            --suffix)
+                _nc_suffix="$2"; shift 2 ;;
+            --preview|-p)
+                _nc_preview=1; shift ;;
+            --help|-h)
+                cat <<'HELPEOF'
+🌙 nightcore — Create nightcore mixes from FLAC files
+
+Usage:
+  nightcore [options] [file.flac]
+
+Options:
+  -s, --speed <float>     Speed multiplier (default: 1.25)
+  -g, --gain  <float>     Gain adjustment in dB (default: -1)
+  -o, --output <path>     Custom output file path
+      --suffix <text>     Custom suffix (default: "Nightcore Mix")
+  -p, --preview           Audition a 15s snippet before processing
+  -h, --help              Show this help
+
+Examples:
+  nightcore                           # interactive picker
+  nightcore track.flac                # quick nightcore with defaults
+  nightcore -s 1.3 -g -2 track.flac  # custom speed & gain
+  nightcore --preview track.flac      # preview before saving
+
+Without arguments, opens an fzf picker to browse your music library.
+HELPEOF
+                return 0
+                ;;
+            -*)
+                echo "❌ Unknown option: $1 (try nightcore --help)"
+                return 1
+                ;;
+            *)
+                _nc_input="$1"; shift ;;
+        esac
+    done
+
+    # ── dependency check ─────────────────────────────────────────
+    local _nc_missing=()
+    command -v sox   &>/dev/null || _nc_missing+=(sox)
+    command -v ffmpeg &>/dev/null || _nc_missing+=(ffmpeg)
+    command -v ffprobe &>/dev/null || _nc_missing+=(ffprobe)
+    if [[ ${#_nc_missing[@]} -gt 0 ]]; then
+        echo "❌ Missing dependencies: ${_nc_missing[*]}"
+        echo "   Install with: sudo pacman -S ${_nc_missing[*]}"
+        return 1
+    fi
+
+    # ── file picker (if no input file given) ─────────────────────
+    if [[ -z "$_nc_input" ]]; then
+        command -v fzf &>/dev/null || { echo "❌ fzf is required for the interactive picker"; return 1; }
+
+        local _nc_cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
+        local _nc_preview_cmd="'${_nc_script_dir}/_fzf_preview.py' {1}"
+
+        local _nc_input_list=""
+        if [[ -s "$_nc_cachefile" ]]; then
+            _nc_input_list=$(sort -t$'\t' -k2 -f "$_nc_cachefile" | awk -F'\t' '{ printf "%s\t%s - %s\n", $1, $2, $3 }')
+        else
+            # Fallback: scan directory directly
+            local _nc_files=("$_nc_musicdir"/**/*.flac(N.on))
+            if [[ ${#_nc_files[@]} -eq 0 ]]; then
+                echo "❌ No FLAC files found in $_nc_musicdir"
+                return 1
+            fi
+            for f in "${_nc_files[@]}"; do
+                _nc_input_list+="${f}"$'\t'"${f##*/}"$'\n'
+            done
+        fi
+
+        if [[ -z "$_nc_input_list" ]]; then
+            echo "❌ No FLAC files found in $_nc_musicdir"
+            return 1
+        fi
+
+        local _nc_selected
+        _nc_selected=$(echo "$_nc_input_list" | \
+            fzf --delimiter=$'\t' --with-nth=2 \
+                --prompt="🌙 Pick a track to nightcore: " \
+                --header="ENTER=select  ESC=cancel" \
+                --preview "$_nc_preview_cmd" \
+                --preview-window=right:50%)
+        [[ -z "$_nc_selected" ]] && return 0
+        _nc_input=$(echo "$_nc_selected" | cut -f1)
+    fi
+
+    # ── validate input ───────────────────────────────────────────
+    if [[ ! -f "$_nc_input" ]]; then
+        echo "❌ File not found: $_nc_input"
+        return 1
+    fi
+
+    # ── interactive settings ─────────────────────────────────────
+    echo ""
+    echo "╔════════════════════════════════════════════════════╗"
+    echo "║  🌙 Nightcore Mix Studio                          ║"
+    echo "╚════════════════════════════════════════════════════╝"
+    echo ""
+    local _nc_basename="${_nc_input##*/}"
+    local _nc_name="${_nc_basename%.flac}"
+    _nc_name="${_nc_name%.FLAC}"
+    echo "  📄 Input:  $_nc_name"
+    echo ""
+
+    # Speed
+    if [[ -z "$_nc_speed" ]]; then
+        local _nc_speed_input
+        read "_nc_speed_input?  ⚡ Speed multiplier [1.25]: "
+        _nc_speed="${_nc_speed_input:-1.25}"
+    fi
+
+    # Validate speed is a number
+    if ! [[ "$_nc_speed" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "❌ Invalid speed: $_nc_speed (must be a positive number)"
+        return 1
+    fi
+
+    # Gain
+    if [[ -z "$_nc_gain" ]]; then
+        local _nc_gain_input
+        read "_nc_gain_input?  🔊 Gain adjustment dB [-1]: "
+        _nc_gain="${_nc_gain_input:--1}"
+    fi
+
+    # Validate gain is a number (can be negative)
+    if ! [[ "$_nc_gain" =~ ^-?[0-9]+\.?[0-9]*$ ]]; then
+        echo "❌ Invalid gain: $_nc_gain (must be a number)"
+        return 1
+    fi
+
+    echo ""
+    echo "  ─────────────────────────────────────────────"
+    echo "  ⚡ Speed:  ${_nc_speed}x"
+    echo "  🔊 Gain:   ${_nc_gain} dB"
+    echo "  ─────────────────────────────────────────────"
+
+    # ── generate output filename ─────────────────────────────────
+    if [[ -z "$_nc_output" ]]; then
+        local _nc_dir="${_nc_input:h}"
+        # Strip any existing "(Nightcore*)" suffix to avoid double-tagging
+        local _nc_clean_name="$_nc_name"
+        _nc_clean_name="${_nc_clean_name% \(Nightcore*\)}"
+        _nc_clean_name="${_nc_clean_name% (Nightcore*)}"
+        _nc_output="${_nc_dir}/${_nc_clean_name} (${_nc_suffix}).flac"
+    fi
+
+    echo "  📁 Output: ${_nc_output##*/}"
+    echo ""
+
+    # ── check if output already exists ───────────────────────────
+    if [[ -f "$_nc_output" ]]; then
+        local _nc_overwrite
+        read "_nc_overwrite?  ⚠️  Output file exists. Overwrite? [y/N]: "
+        [[ "$_nc_overwrite" != [yY]* ]] && { echo "  Cancelled."; return 0; }
+    fi
+
+    # ── preview mode: play a 15s snippet ─────────────────────────
+    if (( _nc_preview )); then
+        echo "  🎧 Playing 15s preview... (Ctrl+C to stop)"
+        sox "$_nc_input" -d trim 30 15 speed "$_nc_speed" gain "$_nc_gain" 2>/dev/null
+        echo ""
+        local _nc_proceed
+        read "_nc_proceed?  Continue with full conversion? [Y/n]: "
+        [[ "$_nc_proceed" == [nN]* ]] && { echo "  Cancelled."; return 0; }
+    fi
+
+    # ── process with sox ─────────────────────────────────────────
+    local _nc_tmpout=$(mktemp /tmp/nightcore-XXXXXX.flac)
+
+    echo "  ⏳ Processing..."
+    local _nc_start=$SECONDS
+
+    if ! sox "$_nc_input" "$_nc_tmpout" speed "$_nc_speed" gain "$_nc_gain" 2>/dev/null; then
+        echo "  ❌ sox failed!"
+        rm -f "$_nc_tmpout"
+        return 1
+    fi
+
+    # ── copy metadata tags from original ─────────────────────────
+    # sox doesn't preserve FLAC tags, so we use ffmpeg to mux them back
+    local _nc_tmptagged=$(mktemp /tmp/nightcore-tagged-XXXXXX.flac)
+
+    # Extract cover art from the original (if present)
+    local _nc_coverart=$(mktemp /tmp/nightcore-cover-XXXXXX.jpg)
+    ffmpeg -y -v quiet -i "$_nc_input" -an -vcodec mjpeg -frames:v 1 "$_nc_coverart" 2>/dev/null
+    local _nc_has_cover=0
+    [[ -s "$_nc_coverart" ]] && _nc_has_cover=1
+
+    # Re-mux: take audio from sox output, tags + cover from original
+    if (( _nc_has_cover )); then
+        ffmpeg -y -v quiet \
+            -i "$_nc_tmpout" \
+            -i "$_nc_coverart" \
+            -map 0:a -map 1:0 \
+            -c:a copy \
+            -c:v mjpeg \
+            -disposition:v attached_pic \
+            -metadata:s:v title="Album cover" \
+            -metadata:s:v comment="Cover (front)" \
+            "$_nc_tmptagged" 2>/dev/null
+    else
+        cp "$_nc_tmpout" "$_nc_tmptagged"
+    fi
+
+    # Copy over the original metadata tags using ffprobe + ffmpeg
+    local _nc_tag_args=()
+    local _nc_tags
+    _nc_tags=$(ffprobe -v quiet -show_entries format_tags -of json "$_nc_input" 2>/dev/null)
+    if [[ -n "$_nc_tags" ]]; then
+        # Parse tags and build ffmpeg metadata arguments
+        local _nc_parsed_tags
+        _nc_parsed_tags=$(echo "$_nc_tags" | python3 -c '
+import json, sys
+try:
+    suffix = sys.argv[1]
+    name_fallback = sys.argv[2]
+    d = json.load(sys.stdin)
+    tags = d.get("format", {}).get("tags", {})
+    found_title = False
+    for k, v in tags.items():
+        val = v
+        if k.lower() == "title":
+            found_title = True
+            # Strip existing suffix if present to avoid duplicates
+            clean_v = v.split(" (Nightcore")[0]
+            val = f"{clean_v} ({suffix})"
+        
+        # Escape for shell
+        val_clean = val.replace("\\", "\\\\").replace("\"", "\\\"")
+        print(f"-metadata\n{k}={val_clean}")
+    
+    if not found_title:
+        # If no title tag existed, use the filename
+        print(f"-metadata\ntitle={name_fallback} ({suffix})")
+except: pass
+' "$_nc_suffix" "$_nc_name" 2>/dev/null)
+        if [[ -n "$_nc_parsed_tags" ]]; then
+            _nc_tag_args=(${(f)_nc_parsed_tags})
+        fi
+    fi
+
+    # Final pass: apply original tags to the output
+    if [[ ${#_nc_tag_args[@]} -gt 0 ]]; then
+        local _nc_tmpfinal=$(mktemp /tmp/nightcore-final-XXXXXX.flac)
+        ffmpeg -y -v quiet \
+            -i "$_nc_tmptagged" \
+            -c copy \
+            "${_nc_tag_args[@]}" \
+            "$_nc_tmpfinal" 2>/dev/null
+        if [[ -s "$_nc_tmpfinal" ]]; then
+            mv "$_nc_tmpfinal" "$_nc_tmptagged"
+        else
+            rm -f "$_nc_tmpfinal"
+        fi
+    fi
+
+    # Move to final destination
+    mv "$_nc_tmptagged" "$_nc_output"
+
+    # Cleanup temp files
+    rm -f "$_nc_tmpout" "$_nc_coverart"
+
+    local _nc_elapsed=$(( SECONDS - _nc_start ))
+    echo ""
+    echo "  ✅ Done in ${_nc_elapsed}s!"
+    echo ""
+
+    # Show file sizes
+    local _nc_orig_size=$(stat --printf="%s" "$_nc_input" 2>/dev/null)
+    local _nc_out_size=$(stat --printf="%s" "$_nc_output" 2>/dev/null)
+    if [[ -n "$_nc_orig_size" && -n "$_nc_out_size" ]]; then
+        local _nc_orig_mb=$(printf "%.1f" $(( _nc_orig_size / 1048576.0 )))
+        local _nc_out_mb=$(printf "%.1f" $(( _nc_out_size / 1048576.0 )))
+        echo "  📊 ${_nc_orig_mb} MB → ${_nc_out_mb} MB"
+    fi
+
+    # Show duration comparison
+    local _nc_orig_dur=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 "$_nc_input" 2>/dev/null)
+    local _nc_out_dur=$(ffprobe -v quiet -show_entries format=duration -of default=nw=1:nk=1 "$_nc_output" 2>/dev/null)
+    if [[ -n "$_nc_orig_dur" && -n "$_nc_out_dur" ]]; then
+        local _nc_orig_dur_i=${_nc_orig_dur%.*}
+        local _nc_out_dur_i=${_nc_out_dur%.*}
+        printf "  ⏱️  %d:%02d → %d:%02d\n" \
+            $((_nc_orig_dur_i / 60)) $((_nc_orig_dur_i % 60)) \
+            $((_nc_out_dur_i / 60)) $((_nc_out_dur_i % 60))
+    fi
+
+    echo ""
+    echo "  🎵 ${_nc_output##*/}"
+    echo ""
 }
