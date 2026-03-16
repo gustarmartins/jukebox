@@ -64,7 +64,7 @@ jukebox() {
     fi
     rm -f /tmp/jukebox-cover-*.jpg(N) /tmp/jukebox-cover-next-*.jpg(N) 2>/dev/null
     rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
-    rm -f /tmp/jukebox-queue-*.txt(N) /tmp/jukebox-meta-*.tsv(N) 2>/dev/null
+    rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
     rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
     rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
     rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
@@ -93,7 +93,8 @@ jukebox() {
     local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
     local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
     local queuefile="/tmp/jukebox-queue-$$.txt"
-    local cachefile="/tmp/jukebox-meta-$$.tsv"
+    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/jukebox"
+    local cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
     export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
@@ -101,34 +102,98 @@ jukebox() {
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
 
-    # TODO: Performance optimization needed for massive directories (e.g., 10,000+ MP3s).
-    # Currently, launching a new ffprobe subprocess for every file scales poorly for 
-    # extremely large non-lossless libraries.
-    # --- build metadata cache in background for sorting ---
+    # --- build/update persistent metadata cache (incremental) ---
+    # On first run: full scan. On subsequent runs: only probe NEW files,
+    # remove entries for DELETED files. Makes repeated launches near-instant.
     "$_JUKEBOX_PYTHON" -c "
 import subprocess, json, os, sys
 musicdir = sys.argv[1]
-out = open(sys.argv[2], 'w')
+cache_path = sys.argv[2]
+
+# Discover all .flac files on disk
+disk_files = set()
 for root, dirs, files in os.walk(musicdir):
     for f in sorted(files):
-        if not f.lower().endswith('.flac'): continue
-        fp = os.path.join(root, f)
-        try:
-            r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
-                               capture_output=True, text=True, timeout=10)
-            d = json.loads(r.stdout)
-            tags = d.get('format',{}).get('tags',{})
-            get = lambda k: tags.get(k, tags.get(k.upper(), ''))
-            title = get('title') or f.replace('.flac','')
-            artist = get('artist') or 'Unknown'
-            album = get('album') or 'Unknown'
-            date = get('date') or '0'
-            dur = d.get('format',{}).get('duration','0')
-            out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\n')
-        except: pass
-out.close()
+        if f.lower().endswith('.flac'):
+            disk_files.add(os.path.join(root, f))
+
+# Load existing cache entries
+cached = {}
+if os.path.exists(cache_path):
+    with open(cache_path) as fh:
+        for line in fh:
+            parts = line.rstrip('\n').split('\t', 1)
+            if len(parts) == 2:
+                cached[parts[0]] = parts[1]
+
+# Find new files that need probing
+new_files = disk_files - set(cached.keys())
+# Remove entries for files that no longer exist
+deleted = set(cached.keys()) - disk_files
+for d in deleted:
+    del cached[d]
+
+# Probe only new files
+for fp in sorted(new_files):
+    try:
+        r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
+                           capture_output=True, text=True, timeout=10)
+        d = json.loads(r.stdout)
+        tags = d.get('format',{}).get('tags',{})
+        get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+        f = os.path.basename(fp)
+        title = get('title') or f.replace('.flac','')
+        artist = get('artist') or 'Unknown'
+        album = get('album') or 'Unknown'
+        date = get('date') or '0'
+        dur = d.get('format',{}).get('duration','0')
+        cached[fp] = f'{title}\t{artist}\t{album}\t{date}\t{dur}'
+    except: pass
+
+# Write the full cache back
+with open(cache_path, 'w') as out:
+    for fp in sorted(cached.keys()):
+        out.write(f'{fp}\t{cached[fp]}\n')
+
+if new_files or deleted:
+    print(f'Cache: +{len(new_files)} new, -{len(deleted)} removed', file=sys.stderr)
 " "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" "$cachefile" &
     local _cache_pid=$!
+
+    # --- live directory watcher (detects new .flac files during playback) ---
+    local _watcher_pid=""
+    if command -v inotifywait >/dev/null 2>&1; then
+        (
+            inotifywait -m -r -e close_write,moved_to --format '%w%f' \
+                "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" 2>/dev/null | while read -r newfile; do
+                [[ "$newfile" != *.flac && "$newfile" != *.FLAC ]] && continue
+                # Check if already in cache
+                grep -qF "$newfile" "$cachefile" 2>/dev/null && continue
+                # Probe and append
+                "$_JUKEBOX_PYTHON" -c "
+import subprocess, json, os, sys
+fp = sys.argv[1]
+cache_path = sys.argv[2]
+try:
+    r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
+                       capture_output=True, text=True, timeout=10)
+    d = json.loads(r.stdout)
+    tags = d.get('format',{}).get('tags',{})
+    get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+    f = os.path.basename(fp)
+    title = get('title') or f.replace('.flac','')
+    artist = get('artist') or 'Unknown'
+    album = get('album') or 'Unknown'
+    date = get('date') or '0'
+    dur = d.get('format',{}).get('duration','0')
+    with open(cache_path, 'a') as out:
+        out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\n')
+except: pass
+" "$newfile" "$cachefile"
+            done
+        ) &
+        _watcher_pid=$!
+    fi
 
     _jukebox_setup_fzf_sort() {
         if [[ -n "$_cache_pid" ]] && kill -0 "$_cache_pid" 2>/dev/null; then
@@ -393,8 +458,13 @@ SORTEOF
             kill -9 "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        # Remove session-specific temp files
-        rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile" "$cachefile"
+        # Kill the live directory watcher
+        if [[ -n "$_watcher_pid" ]] && kill -0 "$_watcher_pid" 2>/dev/null; then
+            kill "$_watcher_pid" 2>/dev/null
+            wait "$_watcher_pid" 2>/dev/null
+        fi
+        # Remove session-specific temp files (persistent cache is kept!)
+        rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
         rm -f "/tmp/jukebox-sort-state-$$"
         rm -rf "$_fzf_sort_dir"
         # Remove log files that accumulate across sessions
