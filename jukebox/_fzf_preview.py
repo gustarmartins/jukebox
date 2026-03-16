@@ -183,6 +183,13 @@ def main():
                 ["ffmpeg", "-y", "-v", "quiet", "-i", filepath,
                  "-an", "-vcodec", "mjpeg", "-frames:v", "1", tmpcover],
                 timeout=10, capture_output=True)
+            if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
+                script_dir = os.environ.get("_JUKEBOX_SCRIPT_DIR", "")
+                fallback = os.path.join(script_dir, "assets", "NO-COVER.png")
+                if os.path.isfile(fallback):
+                    import shutil
+                    shutil.copy(fallback, tmpcover)
+            
             if os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0:
                 art_out = run(["chafa", "--size", f"{art_w}x{art_h}", tmpcover])
                 if art_out:

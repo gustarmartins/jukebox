@@ -601,7 +601,11 @@ except Exception as e:
     # --- extract cover art ---
     _jukebox_extract_art() {
         local filepath="$1"
+        rm -f "$coverfile" 2>/dev/null
         ffmpeg -y -v quiet -i "$filepath" -an -vcodec mjpeg -frames:v 1 "$coverfile" 2>/dev/null
+        if [[ ! -s "$coverfile" ]]; then
+            cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile" 2>/dev/null
+        fi
     }
 
     # --- layout engine: computes all dimensions from terminal size ---
@@ -767,6 +771,9 @@ except Exception as e:
 
         rm -f "$coverfile_next" 2>/dev/null
         ffmpeg -y -v quiet -i "$next_file" -an -vcodec mjpeg -frames:v 1 "$coverfile_next" 2>/dev/null
+        if [[ ! -s "$coverfile_next" ]]; then
+            cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile_next" 2>/dev/null
+        fi
         _jukebox_cache_next_art
 
         _jukebox_next_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "$next_file" 2>/dev/null)
