@@ -63,13 +63,13 @@ jukebox() {
         sleep 0.2
         pkill -9 -f 'input-ipc-server=.*jukebox-mpv' 2>/dev/null
     fi
-    rm -f /tmp/jukebox-cover-*.jpg(N) /tmp/jukebox-cover-next-*.jpg(N) 2>/dev/null
-    rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
-    rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
-    rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
-    rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
-    rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
-    rm -f "${XDG_RUNTIME_DIR:-/tmp}"/jukebox-mpv-*.sock(N) 2>/dev/null
+    command rm -f /tmp/jukebox-cover-*.jpg(N) /tmp/jukebox-cover-next-*.jpg(N) 2>/dev/null
+    command rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
+    command rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
+    command rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
+    command rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
+    command rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
+    command rm -f "${XDG_RUNTIME_DIR:-/tmp}"/jukebox-mpv-*.sock(N) 2>/dev/null
     unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
           _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
 
@@ -273,10 +273,9 @@ SORTEOF
     echo "  6) Browse & pick (plays from selection onward)"
     echo "  7) Shuffle"
     echo "  8) Build queue (TAB to pick, ENTER to play)"
-    echo "  9) Create Nightcore Edit (speed+pitch)"
     echo "  q) Quit"
     echo ""
-    read "choice?Choose [1-9, q]: "
+    read "choice?Choose [1-8, q]: "
 
     case "$choice" in
         1) files=("$musicdir"/**/*.flac(N.)) ;;
@@ -322,7 +321,7 @@ SORTEOF
                     --expect=enter,alt-s \
                     "${_fzf_binds[@]}")
                     
-            rm -rf "$_fzf_sort_dir"
+            command rm -rf "$_fzf_sort_dir"
             [[ -z "$output" ]] && return
             
             local key_pressed=$(echo "$output" | head -n 1)
@@ -414,7 +413,7 @@ SORTEOF
                     --bind 'ctrl-a:select-all,ctrl-d:deselect-all' \
                     "${_fzf_binds[@]}")
                     
-            rm -rf "$_fzf_sort_dir"
+            command rm -rf "$_fzf_sort_dir"
             [[ -z "$selected" ]] && return
             files=("${(@f)${$(echo "$selected" | cut -f1)}}")
             echo ""
@@ -427,83 +426,7 @@ SORTEOF
             done
             start_idx=0
             ;;
-        9)
-            if ! command -v sox >/dev/null 2>&1; then
-                echo "❌ Error: 'sox' is not installed. Please install it (e.g. pacman -S sox) to create Nightcore edits."
-                return 1
-            fi
-            
-            local all_files=("$musicdir"/**/*.flac(N.on))
-            if [[ ${#all_files[@]} -eq 0 ]]; then
-                echo "No FLAC files found in $musicdir"
-                return 1
-            fi
-            
-            _jukebox_setup_fzf_sort
-            local fzf_header="ENTER=select song to nightcore-ify  ESC=cancel"
-            if [[ -s "$cachefile" ]]; then
-                fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
-            fi
-            
-            local input_list
-            input_list=$(_jukebox_get_input_list "${all_files[@]}")
-            local selected
-            selected=$(echo "$input_list" | \
-                fzf \
-                    --delimiter=$'\t' --with-nth=2 \
-                    --prompt="Select for Nightcore Edit: " \
-                    --header="$fzf_header" \
-                    --preview "$_jukebox_fzf_preview" \
-                    --preview-window=right:50% \
-                    "${_fzf_binds[@]}")
-                    
-            rm -rf "$_fzf_sort_dir"
-            [[ -z "$selected" ]] && return
-            local target_file="${selected%%$'\t'*}"
-            
-            echo ""
-            read "speed?Multiplier (e.g. 1.25 for 25% faster track and higher pitch) [1.25]: "
-            speed=${speed:-1.25}
-            
-            local original_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
-            [[ -z "$original_title" ]] && original_title="${${target_file##*/}%.flac}"
-            
-            local out_title="${original_title} (Nightcore)"
-            local out_file="${target_file%.flac} (Nightcore).flac"
-            
-            if [[ -f "$out_file" ]]; then
-                read "overwrite?File already exists. Overwrite? [y/N]: "
-                if [[ "$overwrite" != "y" && "$overwrite" != "Y" ]]; then
-                    echo "Aborted."
-                    return 0
-                fi
-            fi
-            
-            echo -n "✨ Generating Nightcore edit... "
-            if sox "$target_file" "$out_file" speed "$speed" 2>/dev/null; then
-                # optional: apply tags so it looks right in jukebox
-                local original_artist=$(ffprobe -v quiet -show_entries format_tags=artist -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
-                local original_album=$(ffprobe -v quiet -show_entries format_tags=album -of default=nw=1:nk=1 -- "$target_file" 2>/dev/null)
-                # Not embedding the art yet to save an extra ffmpeg pass, but setting basic title tags
-                if command -v ffmpeg >/dev/null 2>&1; then
-                    local tmp_tag="/tmp/jukebox-tag-$$.flac"
-                    ffmpeg -v quiet -y -i "$out_file" -c copy \
-                           -metadata title="$out_title" \
-                           -metadata artist="${original_artist:-Unknown}" \
-                           -metadata album="${original_album:-Unknown}" \
-                           "$tmp_tag" 2>/dev/null
-                    [[ -f "$tmp_tag" ]] && mv "$tmp_tag" "$out_file"
-                fi
-                echo "Done!"
-                files=("$out_file")
-                start_idx=0
-            else
-                echo "Failed to process audio with sox."
-                return 1
-            fi
-            ;;
+
         q|Q) return ;;
         *) echo "Invalid choice"; return 1 ;;
     esac
@@ -543,11 +466,11 @@ SORTEOF
             wait "$_watcher_pid" 2>/dev/null
         fi
         # Remove session-specific temp files (persistent cache is kept!)
-        rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
-        rm -f "/tmp/jukebox-sort-state-$$"
-        rm -rf "$_fzf_sort_dir"
+        command rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
+        command rm -f "/tmp/jukebox-sort-state-$$"
+        command rm -rf "$_fzf_sort_dir"
         # Remove log files that accumulate across sessions
-        rm -f /tmp/jukebox-py.log /tmp/jukebox-debug.log 2>/dev/null
+        command rm -f /tmp/jukebox-py.log /tmp/jukebox-debug.log 2>/dev/null
         # Unset exported env vars so they don't leak into the next session
         unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
               _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
@@ -680,7 +603,7 @@ except Exception as e:
     # --- extract cover art ---
     _jukebox_extract_art() {
         local filepath="$1"
-        rm -f "$coverfile" 2>/dev/null
+        command rm -f "$coverfile" 2>/dev/null
         ffmpeg -y -v quiet -i "$filepath" -an -vcodec mjpeg -frames:v 1 "$coverfile" 2>/dev/null
         if [[ ! -s "$coverfile" ]]; then
             cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile" 2>/dev/null
@@ -848,7 +771,7 @@ except Exception as e:
         local next_file="$1"
         local next_item_id="$2"
 
-        rm -f "$coverfile_next" 2>/dev/null
+        command rm -f "$coverfile_next" 2>/dev/null
         ffmpeg -y -v quiet -i "$next_file" -an -vcodec mjpeg -frames:v 1 "$coverfile_next" 2>/dev/null
         if [[ ! -s "$coverfile_next" ]]; then
             cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile_next" 2>/dev/null
@@ -1154,7 +1077,7 @@ except Exception as e:
         printf '\e[?1049h\e[?25l'
         stty -echo -icanon min 0 time 0 2>/dev/null
 
-        rm -rf "$_fzf_sort_dir"
+        command rm -rf "$_fzf_sort_dir"
 
         [[ -z "$selected" ]] && return
 
@@ -1331,7 +1254,7 @@ DELEOF
         printf '\e[?1049h\e[?25l'
         stty -echo -icanon min 0 time 0 2>/dev/null
 
-        rm -rf "$script_dir"
+        command rm -rf "$script_dir"
 
         # jump to selected song (ignore separator lines)
         if [[ -n "$result" ]] && ! echo "$result" | grep -qE '^[━]'; then
@@ -1748,18 +1671,24 @@ HELPEOF
         local _nc_clean_name="$_nc_name"
         _nc_clean_name="${_nc_clean_name% \(Nightcore*\)}"
         _nc_clean_name="${_nc_clean_name% (Nightcore*)}"
-        _nc_output="${_nc_dir}/${_nc_clean_name} (${_nc_suffix}).flac"
+        
+        local _nc_base_output="${_nc_dir}/${_nc_clean_name} (${_nc_suffix}).flac"
+        
+        # Auto-increment if file exists
+        if [[ -f "$_nc_base_output" ]]; then
+            local _nc_counter=2
+            while [[ -f "${_nc_dir}/${_nc_clean_name} (${_nc_suffix} ${_nc_counter}).flac" ]]; do
+                ((_nc_counter++))
+            done
+            _nc_suffix="${_nc_suffix} ${_nc_counter}"
+            _nc_output="${_nc_dir}/${_nc_clean_name} (${_nc_suffix}).flac"
+        else
+            _nc_output="$_nc_base_output"
+        fi
     fi
 
     echo "  📁 Output: ${_nc_output##*/}"
     echo ""
-
-    # ── check if output already exists ───────────────────────────
-    if [[ -f "$_nc_output" ]]; then
-        local _nc_overwrite
-        read "_nc_overwrite?  ⚠️  Output file exists. Overwrite? [y/N]: "
-        [[ "$_nc_overwrite" != [yY]* ]] && { echo "  Cancelled."; return 0; }
-    fi
 
     # ── preview mode: play a 15s snippet ─────────────────────────
     if (( _nc_preview )); then
@@ -1779,7 +1708,7 @@ HELPEOF
 
     if ! sox "$_nc_input" "$_nc_tmpout" speed "$_nc_speed" gain "$_nc_gain" 2>/dev/null; then
         echo "  ❌ sox failed!"
-        rm -f "$_nc_tmpout"
+        command rm -f "$_nc_tmpout"
         return 1
     fi
 
@@ -1857,7 +1786,7 @@ except: pass
         if [[ -s "$_nc_tmpfinal" ]]; then
             mv "$_nc_tmpfinal" "$_nc_tmptagged"
         else
-            rm -f "$_nc_tmpfinal"
+            command rm -f "$_nc_tmpfinal"
         fi
     fi
 
@@ -1865,7 +1794,7 @@ except: pass
     mv "$_nc_tmptagged" "$_nc_output"
 
     # Cleanup temp files
-    rm -f "$_nc_tmpout" "$_nc_coverart"
+    command rm -f "$_nc_tmpout" "$_nc_coverart"
 
     local _nc_elapsed=$(( SECONDS - _nc_start ))
     echo ""
