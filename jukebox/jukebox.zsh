@@ -964,8 +964,30 @@ except Exception as e:
             bar=" [$(printf '━%.0s' {1..$filled} 2>/dev/null)$(printf '─%.0s' {1..$empty} 2>/dev/null)]"
         fi
 
+        local speed="${_render_speed:-1.000000}"
+        local pitch="${_render_pitch:-1.000000}"
+        local apc="${_render_apc:-true}"
+        
+        local speed_fmt=$(printf "%.2f" "$speed")
+        local pitch_fmt=$(printf "%.2f" "$pitch")
+        
+        local fx_str=""
+        if [[ "$apc" == "false" ]]; then
+            if [[ "$speed_fmt" != "1.00" ]]; then
+                fx_str="(🌙 Nightcore ${speed_fmt}x)"
+            fi
+        else
+            local parts=()
+            [[ "$speed_fmt" != "1.00" ]] && parts+=("⚡ ${speed_fmt}x")
+            [[ "$pitch_fmt" != "1.00" ]] && parts+=("🎵 ${pitch_fmt}x")
+            if (( ${#parts[@]} > 0 )); then
+                fx_str="(${(j: )parts})"
+            fi
+        fi
+
         local info="♫  $title"
         [[ -n "$artist" ]] && info="$info  —  $artist"
+        [[ -n "$fx_str" ]] && info="$info  $fx_str"
         local track_info="[$((pl_pos + 1)) / $pl_count]"
 
         # begin synchronized output (Kitty double-buffers until end marker)
@@ -981,7 +1003,7 @@ except Exception as e:
         local cur_row=1
         if [[ "$_layout_mode" == "normal" ]]; then
             # Full header: 2 control lines + info + album + track
-            local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  []=speed"
+            local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  [/]=adj  P=mode:${_rt_mode}"
             local controls2="A=add next  L=queue  j/k=nav next  ENTER=play nav  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
@@ -1000,7 +1022,7 @@ except Exception as e:
 
         elif [[ "$_layout_mode" == "compact" ]]; then
             # Compact: 1 control line + info with track
-            local controls_compact="A=add next  L=queue  j/k=nav  ENTER=play  q=quit"
+            local controls_compact="A=add  L=que  j/k=nav  ENTER=play  P=mode:${_rt_mode}  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
             printf '\e[0m'
@@ -1282,6 +1304,7 @@ DELEOF
     local _render_path="" _render_title="" _render_artist="" _render_album=""
     local _render_pl_pos=0 _render_pl_count=0
     local _render_time_pos=0 _render_duration=0 _render_paused=""
+    local _render_speed=1.0 _render_pitch=1.0 _render_apc="true"
     local _jukebox_last_next_file=""
     local _jukebox_next_retries=0
     local _nav_offset=0
@@ -1313,7 +1336,8 @@ DELEOF
 
     # main display loop
     local _tick=0 key="" seq="" _drain="" new_cols new_rows _est_next _poll_batch pos dur pos_i dur_i pos_m pos_s dur_m dur_s time_str icon label bar_w bar filled empty
-    local _p_path _p_paused _p_count _p_pos _p_time _p_dur _p_title _p_artist _p_album _p_next_file _p_next_id
+    local _p_path _p_paused _p_count _p_pos _p_time _p_dur _p_title _p_artist _p_album _p_next_file _p_next_id _p_speed _p_pitch _p_apc
+    local _rt_mode="tempo"
 
     while kill -0 "$_jukebox_mpv_pid" 2>/dev/null; do
         # 1. Handle Input (non-blocking, fast drain)
@@ -1325,9 +1349,40 @@ DELEOF
                 '<')  _jukebox_set '{"command":["playlist-prev"]}' ;;
                 '.')  _jukebox_set '{"command":["playlist-next"]}' ;;
                 '>')  _jukebox_set '{"command":["playlist-next"]}' ;;
-                '[')  _jukebox_set '{"command":["add","speed",-0.25]}' ;;
-                ']')  _jukebox_set '{"command":["add","speed",0.25]}' ;;
-                $'\x7f') _jukebox_set '{"command":["set_property","speed",1.0]}' ;;
+                'p'|'P')
+                    if [[ "$_rt_mode" == "tempo" ]]; then
+                        _rt_mode="nightcore"
+                        _jukebox_set '{"command":["set_property","audio-pitch-correction",false]}'
+                    elif [[ "$_rt_mode" == "nightcore" ]]; then
+                        _rt_mode="pitch"
+                        _jukebox_set '{"command":["set_property","audio-pitch-correction",true]}'
+                    else
+                        _rt_mode="tempo"
+                        _jukebox_set '{"command":["set_property","audio-pitch-correction",true]}'
+                    fi
+                    force_redraw=1
+                    ;;
+                '[')
+                    if [[ "$_rt_mode" == "pitch" ]]; then
+                        _jukebox_set '{"command":["add","pitch",-0.05]}'
+                    else
+                        _jukebox_set '{"command":["add","speed",-0.05]}'
+                    fi
+                    ;;
+                ']')
+                    if [[ "$_rt_mode" == "pitch" ]]; then
+                        _jukebox_set '{"command":["add","pitch",0.05]}'
+                    else
+                        _jukebox_set '{"command":["add","speed",0.05]}'
+                    fi
+                    ;;
+                $'\x7f')
+                    _jukebox_set '{"command":["set_property","speed",1.0]}'
+                    _jukebox_set '{"command":["set_property","pitch",1.0]}'
+                    _rt_mode="tempo"
+                    _jukebox_set '{"command":["set_property","audio-pitch-correction",true]}'
+                    force_redraw=1
+                    ;;
                 'j')
                     if (( _render_pl_pos + 1 + _nav_offset < _render_pl_count - 1 )); then
                         _nav_offset=$((_nav_offset + 1)); _jukebox_last_next_file=""; force_redraw=1
@@ -1398,10 +1453,12 @@ DELEOF
         
         _poll_batch=$(_jukebox_batch_get path pause playlist-count playlist-pos \
             time-pos duration metadata/by-key/title metadata/by-key/artist \
-            metadata/by-key/album "playlist/$_est_next/filename" "playlist/$_est_next/id")
+            metadata/by-key/album "playlist/$_est_next/filename" "playlist/$_est_next/id" \
+            speed pitch audio-pitch-correction)
             
         IFS=$'\x1f' read -r _p_path _p_paused _p_count _p_pos _p_time _p_dur \
-            _p_title _p_artist _p_album _p_next_file _p_next_id <<< "$_poll_batch"
+            _p_title _p_artist _p_album _p_next_file _p_next_id \
+            _p_speed _p_pitch _p_apc <<< "$_poll_batch"
 
         # Update shared render state
         _render_path="$_p_path"
@@ -1413,6 +1470,9 @@ DELEOF
         _render_title="$_p_title"
         _render_artist="$_p_artist"
         _render_album="$_p_album"
+        _render_speed="$_p_speed"
+        _render_pitch="$_p_pitch"
+        _render_apc="$_p_apc"
 
         # 4. Handle track change
         if [[ -n "$_render_path" && "$_render_path" != "$last_path" ]]; then
