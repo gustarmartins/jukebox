@@ -981,7 +981,7 @@ except Exception as e:
             [[ "$speed_fmt" != "1.00" ]] && parts+=("⚡ ${speed_fmt}x")
             [[ "$pitch_fmt" != "1.00" ]] && parts+=("🎵 ${pitch_fmt}x")
             if (( ${#parts[@]} > 0 )); then
-                fx_str="(${(j: )parts})"
+                fx_str="(${(j/ /)parts})"
             fi
         fi
 
