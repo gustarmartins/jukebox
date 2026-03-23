@@ -968,8 +968,8 @@ except Exception as e:
         local pitch="${_render_pitch:-1.000000}"
         local apc="${_render_apc:-true}"
         
-        local speed_fmt=$(printf "%.2f" "$speed")
-        local pitch_fmt=$(printf "%.2f" "$pitch")
+        local speed_fmt=$(LC_NUMERIC=C printf "%.2f" "$speed" 2>/dev/null || echo "1.00")
+        local pitch_fmt=$(LC_NUMERIC=C printf "%.2f" "$pitch" 2>/dev/null || echo "1.00")
         
         local fx_str=""
         if [[ "$apc" == "false" ]]; then
@@ -1376,7 +1376,7 @@ DELEOF
                         _jukebox_set '{"command":["add","speed",0.05]}'
                     fi
                     ;;
-                $'\x7f')
+                $'r'|$'R'|$'\x7f'|$'\b')
                     _jukebox_set '{"command":["set_property","speed",1.0]}'
                     _jukebox_set '{"command":["set_property","pitch",1.0]}'
                     _rt_mode="tempo"
