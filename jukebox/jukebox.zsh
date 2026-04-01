@@ -1732,14 +1732,18 @@ HELPEOF
     # ── generate output filename ─────────────────────────────────
     if [[ -z "$_nc_output" ]]; then
         local _nc_dir="${_nc_input:h}"
-        # Strip any existing "(Nightcore*)" suffix to avoid double-tagging
+        # Strip any existing nightcore suffix to avoid double-tagging
+        # Catches: (Nightcore Mix), (Nightcore Mix 2), (1.25x Nightcore Mix), etc.
         local _nc_clean_name="$_nc_name"
-        _nc_clean_name="${_nc_clean_name% \(Nightcore*\)}"
-        _nc_clean_name="${_nc_clean_name% (Nightcore*)}"
-        
+        _nc_clean_name="${_nc_clean_name% \(*Nightcore*\)}"
+
+        # Embed the speed in the suffix so different speeds coexist naturally
+        # e.g. "Song (1.25x Nightcore Mix).flac" vs "Song (1.30x Nightcore Mix).flac"
+        _nc_suffix="${_nc_speed}x ${_nc_suffix}"
+
         local _nc_base_output="${_nc_dir}/${_nc_clean_name} (${_nc_suffix}).flac"
-        
-        # Auto-increment if file exists
+
+        # Counter only needed if the exact same speed was used before
         if [[ -f "$_nc_base_output" ]]; then
             local _nc_counter=2
             while [[ -f "${_nc_dir}/${_nc_clean_name} (${_nc_suffix} ${_nc_counter}).flac" ]]; do
@@ -1811,7 +1815,7 @@ HELPEOF
         # Parse tags and build ffmpeg metadata arguments
         local _nc_parsed_tags
         _nc_parsed_tags=$(echo "$_nc_tags" | python3 -c '
-import json, sys
+import json, sys, re
 try:
     suffix = sys.argv[1]
     name_fallback = sys.argv[2]
@@ -1822,8 +1826,8 @@ try:
         val = v
         if k.lower() == "title":
             found_title = True
-            # Strip existing suffix if present to avoid duplicates
-            clean_v = v.split(" (Nightcore")[0]
+            # Strip any existing nightcore suffix (handles all variants)
+            clean_v = re.sub(r"\s*\([^)]*Nightcore[^)]*\)\s*$", "", v).strip()
             val = f"{clean_v} ({suffix})"
         
         # Escape for shell
