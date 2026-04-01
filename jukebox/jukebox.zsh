@@ -968,8 +968,11 @@ except Exception as e:
         local pitch="${_render_pitch:-1.000000}"
         local apc="${_render_apc:-true}"
         
-        local speed_fmt=$(LC_NUMERIC=C printf "%.2f" "$speed" 2>/dev/null || echo "1.00")
-        local pitch_fmt=$(LC_NUMERIC=C printf "%.2f" "$pitch" 2>/dev/null || echo "1.00")
+        local speed_fmt pitch_fmt
+        { LC_NUMERIC=C printf -v speed_fmt "%.2f" "$speed" } 2>/dev/null || speed_fmt="1.00"
+        { LC_NUMERIC=C printf -v pitch_fmt "%.2f" "$pitch" } 2>/dev/null || pitch_fmt="1.00"
+        [[ "$speed_fmt" == "0.00" ]] && speed_fmt="1.00"
+        [[ "$pitch_fmt" == "0.00" ]] && pitch_fmt="1.00"
         
         local fx_str=""
         if [[ "$apc" == "false" ]]; then
@@ -981,7 +984,7 @@ except Exception as e:
             [[ "$speed_fmt" != "1.00" ]] && parts+=("⚡ ${speed_fmt}x")
             [[ "$pitch_fmt" != "1.00" ]] && parts+=("🎵 ${pitch_fmt}x")
             if (( ${#parts[@]} > 0 )); then
-                fx_str="(${(j/ /)parts})"
+                fx_str="(${(j. .)parts})"
             fi
         fi
 
@@ -1368,6 +1371,7 @@ DELEOF
                     else
                         _jukebox_set '{"command":["add","speed",-0.05]}'
                     fi
+                    force_redraw=1
                     ;;
                 ']')
                     if [[ "$_rt_mode" == "pitch" ]]; then
@@ -1375,8 +1379,9 @@ DELEOF
                     else
                         _jukebox_set '{"command":["add","speed",0.05]}'
                     fi
+                    force_redraw=1
                     ;;
-                $'r'|$'R'|$'\x7f'|$'\b')
+                'r'|'R'|$'\x7f')
                     _jukebox_set '{"command":["set_property","speed",1.0]}'
                     _jukebox_set '{"command":["set_property","pitch",1.0]}'
                     _rt_mode="tempo"
