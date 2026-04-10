@@ -486,7 +486,7 @@ SORTEOF
 
     # start mpv in background with IPC socket, fully headless
     _jukebox_log "mpv: starting with playlist=$playlist sock=$mpvsock start_idx=$start_idx"
-    mpv --no-video --no-terminal \
+    env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
         --audio-format=s32 \
         --audio-samplerate=0 \
         --keep-open=no \
@@ -1007,7 +1007,7 @@ except Exception as e:
         if [[ "$_layout_mode" == "normal" ]]; then
             # Full header: 2 control lines + info + album + track
             local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  [/]=adj  P=mode:${_rt_mode}"
-            local controls2="A=add next  L=queue  j/k=nav next  ENTER=play nav  q=quit"
+            local controls2="A=add next  L=queue  j/k=nav next  i=info  ENTER=play nav  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
             printf '\e[2;1H'
@@ -1025,7 +1025,7 @@ except Exception as e:
 
         elif [[ "$_layout_mode" == "compact" ]]; then
             # Compact: 1 control line + info with track
-            local controls_compact="A=add  L=que  j/k=nav  ENTER=play  P=mode:${_rt_mode}  q=quit"
+            local controls_compact="A=add  L=que  j/k=nav  i=info  ENTER=play  P=mode:${_rt_mode}  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
             printf '\e[0m'
@@ -1165,15 +1165,35 @@ except Exception as e:
         # fetch script: shows NOW PLAYING, then QUEUE section, then LIBRARY section
         cat << 'FETCHEOF' > "$fetch_script"
 #!/usr/bin/env bash
-pl_json=$(echo '{"command":["get_property","playlist"]}' | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" 2>/dev/null)
-count=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print(len(d))' 2>/dev/null)
+pl_json=$("$_JUKEBOX_PYTHON" -c '
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sys.argv[1])
+    s.sendall(b"{\"command\":[\"get_property\",\"playlist\"], \"request_id\": 777}\n")
+    buf = b""
+    while True:
+        c = s.recv(4096)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            obj = json.loads(line)
+            if obj.get("request_id") == 777:
+                print(json.dumps(obj))
+                sys.exit(0)
+except Exception: pass
+' "$_JUKEBOX_SOCK" 2>/dev/null)
+
+count=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print(len(d))' 2>/dev/null)
 (( count == 0 )) && exit 0
 
 # Find current position
-cur_pos=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print(next((i for i, x in enumerate(d) if x.get("current")), 0))' 2>/dev/null)
+cur_pos=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print(next((i for i, x in enumerate(d) if x.get("current")), 0))' 2>/dev/null)
 
 # Parse all entries (include id)
-entries=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.load(sys.stdin).get("data", []); print("\n".join(f"{str(x.get(\"current\", False)).lower()}\t{i}\t{x.get(\"filename\",\"\")}\t{x.get(\"id\",\"\")}" for i, x in enumerate(d)))' 2>/dev/null)
+entries=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print("\n".join(f"{str(x.get(\"current\", False)).lower()}\t{i}\t{x.get(\"filename\",\"\")}\t{x.get(\"id\",\"\")}" for i, x in enumerate(d)))' 2>/dev/null)
 
 # Resolve display name from cache or fall back to filename
 resolve_name() {
@@ -1246,8 +1266,37 @@ echo "$1" | grep -qE '^[━]' && exit 0
 num=$(echo "$1" | grep -o -E '[0-9]+' | head -n 1)
 if [[ -n "$num" ]]; then
     idx=$((num - 1))
-    item_id=$("$_JUKEBOX_PYTHON" -c 'import socket, json, sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall((json.dumps({"command": ["get_property", sys.argv[2]]})+"\n").encode()); d=s.recv(4096).split(b"\n")[0]; print(json.loads(d).get("data", ""))' "$_JUKEBOX_SOCK" "playlist/$idx/id" 2>/dev/null)
-    echo "{\"command\":[\"playlist-remove\",$idx]}" | socat -t 0.5 - UNIX-CONNECT:"$_JUKEBOX_SOCK" > /dev/null 2>&1
+    item_id=$("$_JUKEBOX_PYTHON" -c '
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(sys.argv[1])
+    idx = int(sys.argv[2])
+    
+    # 1. Get ID robustly
+    s.sendall(json.dumps({"command": ["get_property", f"playlist/{idx}/id"], "request_id": 1}).encode() + b"\n")
+    item_id = ""
+    buf = b""
+    got_id = False
+    while not got_id:
+        c = s.recv(4096)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            obj = json.loads(line)
+            if obj.get("request_id") == 1:
+                item_id = obj.get("data", "")
+                got_id = True
+                break
+                
+    # 2. Remove from playlist and exit
+    s.sendall(json.dumps({"command": ["playlist-remove", idx]}).encode() + b"\n")
+    print(item_id)
+except Exception: pass
+' "$_JUKEBOX_SOCK" "$idx" 2>/dev/null)
+
     if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
         tmp=$(mktemp)
         found=0
@@ -1421,8 +1470,119 @@ DELEOF
                     _jukebox_next_retries=0
                     force_redraw=1
                     ;;
+                'i'|'I')
+                    # Show detailed FLAC file info overlay
+                    if [[ -n "$_render_path" ]]; then
+                        printf '\e[?1049l\e[?25h'
+                        [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
+                        echo ""
+                        echo "╔════════════════════════════════════════════════════════════╗"
+                        echo "║  ℹ️  FLAC File Info                                       ║"
+                        echo "╚════════════════════════════════════════════════════════════╝"
+                        echo ""
+                        # File path
+                        local _info_basename="${_render_path##*/}"
+                        local _info_dir="${_render_path%/*}"
+                        echo "  📄 File:    $_info_basename"
+                        echo "  📁 Path:    $_info_dir"
+                        echo ""
+                        # Stream info via ffprobe (sample rate, bit depth, channels, codec)
+                        local _info_stream
+                        _info_stream=$(ffprobe -v quiet -select_streams a:0 \
+                            -show_entries stream=sample_rate,bits_per_sample,channels,codec_name,codec_long_name \
+                            -of csv=p=0 -- "$_render_path" 2>/dev/null)
+                        if [[ -n "$_info_stream" ]]; then
+                            IFS=',' read -r _i_codec _i_codec_long _i_sr _i_bits _i_ch <<< "$_info_stream"
+                            echo "  🎵 Codec:       ${_i_codec_long:-$_i_codec}"
+                            if [[ -n "$_i_sr" && "$_i_sr" != "N/A" ]]; then
+                                local _i_sr_khz
+                                if (( _i_sr % 1000 == 0 )); then
+                                    _i_sr_khz="$((_i_sr / 1000)) kHz"
+                                else
+                                    _i_sr_khz="$(awk "BEGIN{printf \"%.1f\", $_i_sr/1000}") kHz"
+                                fi
+                                echo "  📊 Sample Rate: $_i_sr Hz ($_i_sr_khz)"
+                            fi
+                            if [[ -n "$_i_bits" && "$_i_bits" != "0" && "$_i_bits" != "N/A" ]]; then
+                                echo "  🔢 Bit Depth:   ${_i_bits}-bit"
+                            fi
+                            if [[ -n "$_i_ch" && "$_i_ch" != "N/A" ]]; then
+                                local _i_ch_label
+                                case "$_i_ch" in
+                                    1) _i_ch_label="Mono" ;;
+                                    2) _i_ch_label="Stereo" ;;
+                                    *) _i_ch_label="${_i_ch} channels" ;;
+                                esac
+                                echo "  🔊 Channels:    $_i_ch ($_i_ch_label)"
+                            fi
+                        fi
+                        echo ""
+                        # Format-level info (duration, bitrate, size)
+                        local _info_fmt
+                        _info_fmt=$(ffprobe -v quiet \
+                            -show_entries format=duration,bit_rate,size \
+                            -of csv=p=0 -- "$_render_path" 2>/dev/null)
+                        if [[ -n "$_info_fmt" ]]; then
+                            IFS=',' read -r _i_dur _i_bitrate _i_fsize <<< "$_info_fmt"
+                            if [[ -n "$_i_dur" && "$_i_dur" != "N/A" ]]; then
+                                local _i_dur_i=${_i_dur%.*}
+                                echo "  ⏱️  Duration:   $(printf "%d:%02d" $((_i_dur_i / 60)) $((_i_dur_i % 60)))"
+                            fi
+                            if [[ -n "$_i_bitrate" && "$_i_bitrate" != "N/A" ]]; then
+                                local _i_br_kbps=$((_i_bitrate / 1000))
+                                echo "  📈 Bitrate:     ${_i_br_kbps} kbps ($(awk "BEGIN{printf \"%.1f\", $_i_bitrate/1000000}") Mbps)"
+                            fi
+                        fi
+                        # File size from stat (more reliable)
+                        local _i_stat_size
+                        _i_stat_size=$(stat -c %s "$_render_path" 2>/dev/null)
+                        if [[ -n "$_i_stat_size" && "$_i_stat_size" != "0" ]]; then
+                            local _i_size_str
+                            if (( _i_stat_size >= 1073741824 )); then
+                                _i_size_str="$(awk "BEGIN{printf \"%.2f GB\", $_i_stat_size/1073741824}")"
+                            elif (( _i_stat_size >= 1048576 )); then
+                                _i_size_str="$(awk "BEGIN{printf \"%.1f MB\", $_i_stat_size/1048576}")"
+                            else
+                                _i_size_str="$(awk "BEGIN{printf \"%.0f KB\", $_i_stat_size/1024}")"
+                            fi
+                            echo "  💾 File Size:   $_i_size_str ($_i_stat_size bytes)"
+                        fi
+                        echo ""
+                        # Tags summary
+                        echo "  ── Tags ──────────────────────────────────────"
+                        [[ -n "$_render_title" ]]  && echo "  Title:   $_render_title"
+                        [[ -n "$_render_artist" ]] && echo "  Artist:  $_render_artist"
+                        [[ -n "$_render_album" ]]  && echo "  Album:   $_render_album"
+                        local _i_date _i_genre _i_tn
+                        _i_date=$(ffprobe -v quiet -show_entries format_tags=date -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
+                        _i_genre=$(ffprobe -v quiet -show_entries format_tags=genre -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
+                        _i_tn=$(ffprobe -v quiet -show_entries format_tags=track -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
+                        [[ -n "$_i_date" ]]  && echo "  Date:    $_i_date"
+                        [[ -n "$_i_genre" ]] && echo "  Genre:   $_i_genre"
+                        [[ -n "$_i_tn" ]]    && echo "  Track:   $_i_tn"
+                        echo ""
+                        echo "  ── Press any key to return ──"
+                        read -rs -k 1
+                        printf '\e[?1049h\e[?25l'
+                        stty -echo -icanon min 0 time 0 2>/dev/null
+                    fi
+                    force_redraw=1
+                    ;;
                 'q'|'Q')
-                    break
+                    local prompt_row=$((_layout_rows / 2))
+                    local prompt_col=$(( (_layout_cols - 38) / 2 ))
+                    (( prompt_col < 1 )) && prompt_col=1
+                    printf '\e[%d;%dH\e[1;41;37m Are you sure you want to quit? (y/N) \e[0m' "$prompt_row" "$prompt_col"
+                    local ans=""
+                    while true; do
+                        read -rs -t 0.1 -k 1 ans 2>/dev/null
+                        if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+                            break 2
+                        elif [[ -n "$ans" ]]; then
+                            force_redraw=1
+                            break
+                        fi
+                    done
                     ;;
                 $'\e')
                     seq=""
