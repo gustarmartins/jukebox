@@ -498,7 +498,7 @@ SORTEOF
         --keep-open=no \
         --playlist="$playlist" \
         --playlist-start="$start_idx" \
-        --input-ipc-server="$mpvsock" &
+        --input-ipc-server="$mpvsock" 2>/dev/null &
     _jukebox_mpv_pid=$!
     _jukebox_log "mpv: PID=$_jukebox_mpv_pid"
 
