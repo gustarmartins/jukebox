@@ -109,7 +109,7 @@ pl_json=$("$_JUKEBOX_PYTHON" -c '
 import socket, json, sys
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2)
+    s.settimeout(3)
     s.connect(sys.argv[1])
     s.sendall(b"{\"command\":[\"get_property\",\"playlist\"], \"request_id\": 777}\n")
     buf = b""
@@ -119,70 +119,94 @@ try:
         buf += c
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except: continue
             if obj.get("request_id") == 777:
+                s.close()
                 print(json.dumps(obj))
                 sys.exit(0)
 except Exception: pass
 ' "$_JUKEBOX_SOCK" 2>/dev/null)
 
-count=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print(len(d))' 2>/dev/null)
-if (( count == 0 )); then
+if [[ -z "$pl_json" ]]; then
     printf '%s\t%s\n' "-" "⏹ No songs in playlist"
     printf '%s\t%s\n' "-" "━━━━━━━━━━━━━━━━━━━━━━━━"
     exit 0
 fi
 
-entries=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print("\n".join(f"{str(x.get(\"current\", False)).lower()}\t{i}\t{x.get(\"filename\",\"\")}\t{x.get(\"id\",\"\")}" for i, x in enumerate(d)))' 2>/dev/null)
+# Parse playlist into entries using a single python call
+"$_JUKEBOX_PYTHON" -c '
+import sys, json, os
 
-cur_pos=$(echo "$pl_json" | "$_JUKEBOX_PYTHON" -c 'import sys, json; d=json.loads(sys.stdin.read() or "{}").get("data", []); print(next((i for i, x in enumerate(d) if x.get("current")), 0))' 2>/dev/null)
+data = json.loads(sys.stdin.read() or "{}").get("data", [])
+if not data:
+    print("-\t⏹ No songs in playlist")
+    print("-\t━━━━━━━━━━━━━━━━━━━━━━━━")
+    sys.exit(0)
 
-resolve_name() {
-    local fp="$1"
-    if (( _JUKEBOX_SHOW_FORMATNAMES )) && [[ -s "$_JUKEBOX_CACHE" ]]; then
-        local cached
-        cached=$(grep -F "$fp" "$_JUKEBOX_CACHE" | head -n 1)
-        if [[ -n "$cached" ]]; then
-            local title artist
-            title=$(echo "$cached" | cut -f2)
-            artist=$(echo "$cached" | cut -f3)
-            echo "${title} - ${artist}"
-            return
-        fi
-    fi
-    local name="${fp##*/}"; name="${name%.flac}"
-    echo "$name"
-}
+cache_file = os.environ.get("_JUKEBOX_CACHE", "")
+queuefile = os.environ.get("_JUKEBOX_QUEUEFILE", "")
+show_fmt = os.environ.get("_JUKEBOX_SHOW_FORMATNAMES", "0")
+
+# Load cache for pretty names
+cache = {}
+if show_fmt == "1" and cache_file:
+    try:
+        with open(cache_file) as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 3:
+                    cache[parts[0]] = parts[1] + " - " + parts[2]
+    except: pass
+
+# Load queue IDs
+queue_ids = set()
+if queuefile:
+    try:
+        with open(queuefile) as f:
+            queue_ids = {line.strip() for line in f if line.strip()}
+    except: pass
+
+def resolve_name(fp):
+    if fp in cache:
+        return cache[fp]
+    name = fp.rsplit("/", 1)[-1]
+    if name.endswith(".flac"):
+        name = name[:-5]
+    return name
+
+# Find current position
+cur_pos = 0
+for i, e in enumerate(data):
+    if e.get("current"):
+        cur_pos = i
+        break
 
 # Header line 1: Now Playing
-now_shown=0
-while IFS=$'\t' read -r is_current idx fp item_id; do
-    if [[ "$is_current" == "true" ]]; then
-        name=$(resolve_name "$fp")
-        printf '%s\t▶ %s) %s\n' "${item_id:--}" "$((idx + 1))" "$name"
-        now_shown=1
-    fi
-done <<< "$entries"
-(( now_shown )) || printf '%s\t%s\n' "-" "⏹ No song playing"
+now = None
+for i, e in enumerate(data):
+    if e.get("current"):
+        now = e
+        name = resolve_name(e.get("filename", ""))
+        item_id = e.get("id", "-")
+        print(f"{item_id}\t▶ {i+1}) {name}")
+        break
+if now is None:
+    print("-\t⏹ No song playing")
 
-# Header line 2: separator with count
-up_count=0
-while IFS=$'\t' read -r is_current idx fp item_id; do
-    [[ "$is_current" != "true" ]] && (( idx > cur_pos )) && up_count=$((up_count + 1))
-done <<< "$entries"
-printf '%s\t━━━━━━━━━━━━ Up Next (%s) ━━━━━━━━━━━━\n' "-" "$up_count"
+# Header line 2: separator with upcoming count
+up_count = sum(1 for i, e in enumerate(data) if i > cur_pos and not e.get("current"))
+print(f"-\t━━━━━━━━━━━━ Up Next ({up_count}) ━━━━━━━━━━━━")
 
-# List items: ALL songs after current position
-while IFS=$'\t' read -r is_current idx fp item_id; do
-    if [[ "$is_current" != "true" ]] && (( idx > cur_pos )); then
-        name=$(resolve_name "$fp")
-        if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]] && grep -qxF "$item_id" "$_JUKEBOX_QUEUEFILE" 2>/dev/null; then
-            printf '%s\t♫ %s) %s\n' "$item_id" "$((idx + 1))" "$name"
-        else
-            printf '%s\t   %s) %s\n' "$item_id" "$((idx + 1))" "$name"
-        fi
-    fi
-done <<< "$entries"
+# Upcoming songs
+for i, e in enumerate(data):
+    if i > cur_pos:
+        name = resolve_name(e.get("filename", ""))
+        item_id = str(e.get("id", ""))
+        marker = "♫" if item_id in queue_ids else "  "
+        print(f"{item_id}\t{marker} {i+1}) {name}")
+' <<< "$pl_json"
 FETCHEOF
 
         # --- delete script: resolves fresh index by stable ID, then removes ---
@@ -196,7 +220,7 @@ import socket, json, sys
 try:
     target_id = int(sys.argv[2])
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2)
+    s.settimeout(3)
     s.connect(sys.argv[1])
     s.sendall(json.dumps({"command": ["get_property", "playlist"], "request_id": 1}).encode() + b"\n")
     buf = b""
@@ -206,12 +230,14 @@ try:
         buf += c
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            obj = json.loads(line)
+            try: obj = json.loads(line)
+            except: continue
             if obj.get("request_id") == 1:
                 for i, e in enumerate(obj.get("data", [])):
                     if e.get("id") == target_id:
                         s.sendall(json.dumps({"command": ["playlist-remove", i]}).encode() + b"\n")
                         break
+                s.close()
                 sys.exit(0)
 except Exception: pass
 ' "$_JUKEBOX_SOCK" "$item_id" 2>/dev/null
@@ -244,7 +270,7 @@ try:
     target_id = int(sys.argv[2])
     direction = sys.argv[3]
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(2)
+    s.settimeout(3)
     s.connect(sys.argv[1])
     s.sendall(json.dumps({"command": ["get_property", "playlist"], "request_id": 1}).encode() + b"\n")
     buf = b""
@@ -254,7 +280,8 @@ try:
         buf += c
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            obj = json.loads(line)
+            try: obj = json.loads(line)
+            except: continue
             if obj.get("request_id") == 1:
                 data = obj.get("data", [])
                 cur_idx = None
@@ -265,16 +292,20 @@ try:
                     if e.get("current"):
                         cur_pos = i
                 if cur_idx is None or cur_pos is None:
+                    s.close()
                     sys.exit(0)
                 if direction == "up":
                     target = cur_idx - 1
                     if target <= cur_pos:
+                        s.close()
                         sys.exit(0)
                 else:
                     target = cur_idx + 1
                     if target >= len(data):
+                        s.close()
                         sys.exit(0)
                 s.sendall(json.dumps({"command": ["playlist-move", cur_idx, target]}).encode() + b"\n")
+                s.close()
                 sys.exit(0)
 except Exception: pass
 ' "$_JUKEBOX_SOCK" "$item_id" "$dir" 2>/dev/null
