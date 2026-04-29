@@ -317,7 +317,7 @@ SORTEOF
             local output
             echo "default" > "/tmp/jukebox-sort-state-$$"
             output=$(echo "$input_list" | \
-                fzf --multi \
+                fzf -i --multi \
                     --delimiter=$'\t' --with-nth=2 \
                     --prompt="Pick start song(s): " \
                     --header="$fzf_header" \
@@ -409,7 +409,7 @@ SORTEOF
 
             local selected
             selected=$(echo "$input_list" | \
-                fzf --multi \
+                fzf -i --multi \
                     --delimiter=$'\t' --with-nth=2 \
                     --prompt="Queue: " \
                     --header="$fzf_header" \
@@ -1053,7 +1053,7 @@ HELPEOF
 
         local _nc_selected
         _nc_selected=$(echo "$_nc_input_list" | \
-            fzf --delimiter=$'\t' --with-nth=2 \
+            fzf -i --delimiter=$'\t' --with-nth=2 \
                 --prompt="🌙 Pick a track to nightcore: " \
                 --header="ENTER=select  ESC=cancel" \
                 --preview "$_nc_preview_cmd" \

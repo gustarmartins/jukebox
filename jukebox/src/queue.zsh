@@ -20,7 +20,7 @@
 
         local selected
         selected=$(echo "$input_list" | \
-            fzf --multi \
+            fzf -i --multi \
                 --delimiter=$'\t' --with-nth=2 \
                 --prompt="Add Next: " \
                 --header="$fzf_header" \
@@ -318,7 +318,7 @@ MOVEEOF
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
         local result
-        result=$("$fetch_script" | fzf \
+        result=$("$fetch_script" | fzf -i \
             --delimiter=$'\t' --with-nth=2.. \
             --header-lines=2 \
             --prompt='Queue: ' \
