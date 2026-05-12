@@ -498,7 +498,8 @@ SORTEOF
         --keep-open=no \
         --playlist="$playlist" \
         --playlist-start="$start_idx" \
-        --input-ipc-server="$mpvsock" 2>/dev/null &
+        --input-ipc-server="$mpvsock" \
+        --script-opts=mpris-identity=Jukebox 2>/dev/null &
     _jukebox_mpv_pid=$!
     _jukebox_log "mpv: PID=$_jukebox_mpv_pid"
 
@@ -1024,6 +1025,12 @@ HELPEOF
         return 1
     fi
 
+    # Big intermediate FLACs (sox/ffmpeg work files) go to disk-backed
+    # storage, not /tmp tmpfs — a hi-res source can balloon to 3× during
+    # the sox→tag→cover passes. Honors $TMPDIR if set; falls back to /tmp.
+    local _nc_tmpdir="${TMPDIR:-/var/tmp}"
+    [[ -d "$_nc_tmpdir" && -w "$_nc_tmpdir" ]] || _nc_tmpdir=/tmp
+
     # ── file picker (if no input file given) ─────────────────────
     if [[ -z "$_nc_input" ]]; then
         command -v fzf &>/dev/null || { echo "❌ fzf is required for the interactive picker"; return 1; }
@@ -1153,7 +1160,7 @@ HELPEOF
     fi
 
     # ── process with sox ─────────────────────────────────────────
-    local _nc_tmpout=$(mktemp /tmp/nightcore-XXXXXX.flac)
+    local _nc_tmpout=$(mktemp "$_nc_tmpdir/nightcore-XXXXXX.flac")
 
     echo "  ⏳ Processing..."
     local _nc_start=$SECONDS
@@ -1166,10 +1173,10 @@ HELPEOF
 
     # ── copy metadata tags from original ─────────────────────────
     # sox doesn't preserve FLAC tags, so we use ffmpeg to mux them back
-    local _nc_tmptagged=$(mktemp /tmp/nightcore-tagged-XXXXXX.flac)
+    local _nc_tmptagged=$(mktemp "$_nc_tmpdir/nightcore-tagged-XXXXXX.flac")
 
     # Extract cover art from the original (if present)
-    local _nc_coverart=$(mktemp /tmp/nightcore-cover-XXXXXX.jpg)
+    local _nc_coverart=$(mktemp "$_nc_tmpdir/nightcore-cover-XXXXXX.jpg")
     ffmpeg -y -v quiet -i "$_nc_input" -an -vcodec mjpeg -frames:v 1 "$_nc_coverart" 2>/dev/null
     local _nc_has_cover=0
     [[ -s "$_nc_coverart" ]] && _nc_has_cover=1
@@ -1229,7 +1236,7 @@ except: pass
 
     # Final pass: apply original tags to the output
     if [[ ${#_nc_tag_args[@]} -gt 0 ]]; then
-        local _nc_tmpfinal=$(mktemp /tmp/nightcore-final-XXXXXX.flac)
+        local _nc_tmpfinal=$(mktemp "$_nc_tmpdir/nightcore-final-XXXXXX.flac")
         ffmpeg -y -v quiet \
             -i "$_nc_tmptagged" \
             -c copy \
