@@ -453,7 +453,7 @@ SORTEOF
         trap - INT TERM HUP QUIT PIPE EXIT 2>/dev/null
         [[ -n "$_jukebox_cleaned" ]] && return
         _jukebox_cleaned=1
-        _jukebox_log "cleanup: starting"
+        (( ${+functions[_jukebox_log]} )) && _jukebox_log "cleanup: starting"
         # Clear Kitty graphics protocol images before leaving altscreen
         printf '\e_Ga=d;\e\\'
         printf '\e[?1049l\e[?25h'
