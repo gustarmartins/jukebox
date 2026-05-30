@@ -124,13 +124,16 @@ for root, dirs, files in os.walk(musicdir):
         if f.lower().endswith('.flac'):
             disk_files.add(os.path.join(root, f))
 
-# Load existing cache entries
+# Load existing cache entries.
+# Cache value layout: title\tartist\talbum\tdate\tdur\ttrack\tdisc (7 fields).
+# Entries written by an older format (fewer fields) are dropped so they get
+# re-probed, which transparently migrates the cache on first launch.
 cached = {}
 if os.path.exists(cache_path):
     with open(cache_path) as fh:
         for line in fh:
             parts = line.rstrip('\n').split('\t', 1)
-            if len(parts) == 2:
+            if len(parts) == 2 and parts[1].count('\t') == 6:
                 cached[parts[0]] = parts[1]
 
 # Find new files that need probing
@@ -148,13 +151,22 @@ for fp in sorted(new_files):
         d = json.loads(r.stdout)
         tags = d.get('format',{}).get('tags',{})
         get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+        def numtag(default, *keys):
+            for k in keys:
+                v = str(get(k)).split('/')[0].strip()
+                if v:
+                    try: return str(int(v))
+                    except ValueError: pass
+            return default
         f = os.path.basename(fp)
         title = get('title') or f.replace('.flac','')
         artist = get('artist') or 'Unknown'
         album = get('album') or 'Unknown'
         date = get('date') or '0'
         dur = d.get('format',{}).get('duration','0')
-        cached[fp] = f'{title}\t{artist}\t{album}\t{date}\t{dur}'
+        track = numtag('0','track','tracknumber')   # 0 = unknown, sorts first
+        disc = numtag('1','disc','discnumber')       # 1 = assume single-disc
+        cached[fp] = f'{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}'
     except: pass
 
 # Write the full cache back
@@ -187,14 +199,23 @@ try:
     d = json.loads(r.stdout)
     tags = d.get('format',{}).get('tags',{})
     get = lambda k: tags.get(k, tags.get(k.upper(), ''))
+    def numtag(default, *keys):
+        for k in keys:
+            v = str(get(k)).split('/')[0].strip()
+            if v:
+                try: return str(int(v))
+                except ValueError: pass
+        return default
     f = os.path.basename(fp)
     title = get('title') or f.replace('.flac','')
     artist = get('artist') or 'Unknown'
     album = get('album') or 'Unknown'
     date = get('date') or '0'
     dur = d.get('format',{}).get('duration','0')
+    track = numtag('0','track','tracknumber')
+    disc = numtag('1','disc','discnumber')
     with open(cache_path, 'a') as out:
-        out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\n')
+        out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}\n')
 except: pass
 " "$newfile" "$cachefile"
             done
@@ -222,16 +243,20 @@ fi
 SORTEOF
         }
 
-        _gen_sort "sort -t$'\t' -k2 -f" "by_title"
-        _gen_sort "sort -t$'\t' -k2 -fr" "by_title_rev"
-        _gen_sort "sort -t$'\t' -k3,3 -f -k2,2 -f" "by_artist"
-        _gen_sort "sort -t$'\t' -k3,3 -fr -k2,2 -f" "by_artist_rev"
-        _gen_sort "sort -t$'\t' -k4,4 -f -k2,2 -f" "by_album"
-        _gen_sort "sort -t$'\t' -k4,4 -fr -k2,2 -f" "by_album_rev"
-        _gen_sort "sort -t$'\t' -k5 -rn" "by_date"
-        _gen_sort "sort -t$'\t' -k5 -n" "by_date_rev"
-        _gen_sort "sort -t$'\t' -k6 -n" "by_length"
-        _gen_sort "sort -t$'\t' -k6 -nr" "by_length_rev"
+        # Cache fields: 1=path 2=title 3=artist 4=album 5=date 6=dur 7=track 8=disc
+        # All multi-track groupings resolve to album -> disc -> track order so a
+        # given album always reads Track 1 -> Track N (disc-aware, numeric).
+        local _ADT="-k4,4f -k8,8n -k7,7n"   # album, disc, track
+        _gen_sort "sort -t$'\t' -k2,2f $_ADT" "by_title"
+        _gen_sort "sort -t$'\t' -k2,2fr $_ADT" "by_title_rev"
+        _gen_sort "sort -t$'\t' -k3,3f $_ADT" "by_artist"
+        _gen_sort "sort -t$'\t' -k3,3fr $_ADT" "by_artist_rev"
+        _gen_sort "sort -t$'\t' $_ADT" "by_album"
+        _gen_sort "sort -t$'\t' -k4,4fr -k8,8n -k7,7n" "by_album_rev"
+        _gen_sort "sort -t$'\t' -k5,5nr $_ADT" "by_date"
+        _gen_sort "sort -t$'\t' -k5,5n $_ADT" "by_date_rev"
+        _gen_sort "sort -t$'\t' -k6,6n -k3,3f $_ADT" "by_length"
+        _gen_sort "sort -t$'\t' -k6,6nr -k3,3f $_ADT" "by_length_rev"
         chmod +x "$_fzf_sort_dir"/*.sh
 
         _fzf_binds=()
@@ -314,7 +339,27 @@ SORTEOF
             visual_paths=$(echo "$input_list" | cut -f1)
             all_files=("${(@f)visual_paths}")
 
-            local output
+# Ratings (column 4): set a 0-5 star rating on a track.
+_jukebox_rate_track() {
+    # Args: rating [path]. Without a path, rate the currently playing track.
+    local rating="$1" path="$2"
+    if [[ -z "$rating" || "$rating" != <-> || "$rating" -gt 5 ]]; then
+        _jukebox_log WARN "invalid rating: ${rating:-<empty>}"
+        print -r -- "jukebox: rating must be an integer 0-5" >&2
+        return 1
+    fi
+    [[ -n "$path" ]] || path=$(_jukebox_current_file)
+    if [[ -z "$path" ]]; then
+        _jukebox_log WARN "no track to rate"
+        print -r -- "jukebox: no track to rate (nothing playing)" >&2
+        return 1
+    fi
+    local id
+    id=$(_jukebox_id_for "$path")
+    _jukebox_meta_set_field "$id" "$path" 4 "$rating"
+    _jukebox_log INFO "rating=$rating for $path"
+    print -r -- "Rated ${rating}/5: ${path:t}"
+}
             echo "default" > "/tmp/jukebox-sort-state-$$"
             output=$(echo "$input_list" | \
                 fzf -i --multi \
@@ -492,10 +537,21 @@ SORTEOF
 
     # start mpv in background with IPC socket, fully headless
     _jukebox_log "mpv: starting with playlist=$playlist sock=$mpvsock start_idx=$start_idx"
+    # Buffering: music lives on a slow HDD, so default mpv (reads ~1s ahead)
+    # keeps seeking back to the file mid-track and fights cover extraction for
+    # the disk head -> audible lag/stutter. Pull each track fully into RAM up
+    # front and preload the next playlist entry while the current one plays, so
+    # the HDD is touched once per track instead of continuously.
     env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
         --audio-format=s32 \
         --audio-samplerate=0 \
         --keep-open=no \
+        --cache=yes \
+        --cache-secs=3600 \
+        --demuxer-max-bytes=512MiB \
+        --demuxer-max-back-bytes=128MiB \
+        --demuxer-readahead-secs=3600 \
+        --prefetch-playlist=yes \
         --playlist="$playlist" \
         --playlist-start="$start_idx" \
         --input-ipc-server="$mpvsock" \
