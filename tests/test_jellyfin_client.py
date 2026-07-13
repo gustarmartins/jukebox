@@ -105,7 +105,7 @@ class JellyfinClientTest(unittest.TestCase):
         cache = Path(self.temp.name) / "metadata.tsv"
         self.assertEqual(jellyfin.command_sync(Namespace(cache=str(cache))), 0)
         fields = cache.read_text().rstrip().split("\t")
-        self.assertEqual(fields[0], f"{self.url}/Audio/track-id/stream?static=true")
+        self.assertEqual(fields[0], f"{self.url}/Items/track-id/Download")
         self.assertNotIn("secret-token", cache.read_text())
         self.assertEqual(fields[1:5], ["A Song", "An Artist", "An Album", "2026"])
         self.assertEqual(fields[6:], ["2", "1"])
@@ -124,12 +124,17 @@ class JellyfinClientTest(unittest.TestCase):
         self.assertEqual(Handler.requests[-1][2], {"Username": "tester", "Pw": "password"})
 
     def test_art_and_synced_lyrics(self):
-        reference = f"{self.url}/Audio/track-id/stream?static=true"
+        reference = f"{self.url}/Items/track-id/Download"
         image = Path(self.temp.name) / "cover.jpg"
         self.assertEqual(jellyfin.command_art(Namespace(reference=reference, output=str(image), max_width=1000)), 0)
         self.assertEqual(image.read_bytes(), b"fake-image")
         payload = jellyfin.request(jellyfin.load_config(), "/Audio/track-id/Lyrics")
         self.assertEqual(jellyfin.normalize_lyrics(payload), [(2000, "First line")])
+        self.assertEqual(jellyfin.item_id_from_reference(reference), "track-id")
+        self.assertEqual(
+            jellyfin.item_id_from_reference(f"{self.url}/Audio/track-id/stream?static=true"),
+            "track-id",
+        )
 
     def test_mpv_config_is_private_and_uses_header(self):
         path = Path(self.temp.name) / "mpv.conf"

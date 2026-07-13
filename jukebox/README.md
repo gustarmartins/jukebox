@@ -118,8 +118,8 @@ a private, short-lived configuration file. Environment overrides are available
 for non-interactive setups: `JUKEBOX_JELLYFIN_URL`,
 `JUKEBOX_JELLYFIN_TOKEN`, and `JUKEBOX_JELLYFIN_USER_ID`.
 
-Jellyfin playback uses the original audio stream (`static=true`) and therefore
-does not intentionally transcode or reduce quality.
+Jellyfin playback uses the range-capable item download endpoint and therefore
+streams the untouched original file without transcoding or reducing quality.
 
 ### Lyrics
 

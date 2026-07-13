@@ -141,7 +141,10 @@ def clean_field(value: Any) -> str:
 
 def item_stream_url(config: dict[str, Any], item: dict[str, Any]) -> str:
     item_id = urllib.parse.quote(str(item["Id"]), safe="")
-    return f"{config['server']}/Audio/{item_id}/stream?static=true"
+    # Jellyfin 10.11 can return HTTP 500 from /Audio/{id}/stream for otherwise
+    # healthy audio items. The Download endpoint supports HTTP ranges and sends
+    # the untouched original file, making it a reliable direct-play source.
+    return f"{config['server']}/Items/{item_id}/Download"
 
 
 def item_to_cache_row(config: dict[str, Any], item: dict[str, Any]) -> list[str]:
@@ -259,10 +262,11 @@ def command_sync(args: argparse.Namespace) -> int:
 
 
 STREAM_RE = re.compile(r"/Audio/([^/?]+)/stream(?:\.[^?/]*)?(?:\?|$)")
+DOWNLOAD_RE = re.compile(r"/Items/([^/?]+)/Download(?:\?|$)")
 
 
 def item_id_from_reference(reference: str) -> str:
-    match = STREAM_RE.search(reference)
+    match = DOWNLOAD_RE.search(reference) or STREAM_RE.search(reference)
     if not match:
         raise JellyfinError("not a Jukebox Jellyfin stream URL")
     return urllib.parse.unquote(match.group(1))

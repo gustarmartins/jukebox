@@ -620,6 +620,7 @@ _jukebox_rate_track() {
     fi
     env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
         "${_mpv_auth_args[@]}" \
+        --ytdl=no \
         --audio-format=s32 \
         --audio-samplerate=0 \
         --keep-open=no \
