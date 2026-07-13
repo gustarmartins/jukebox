@@ -51,7 +51,8 @@ def main():
     if len(sys.argv) < 2:
         return
     filepath = sys.argv[1]
-    if not os.path.isfile(filepath):
+    is_remote = filepath.startswith(("http://", "https://"))
+    if not is_remote and not os.path.isfile(filepath):
         print(f"File not found: {filepath}")
         return
 
@@ -60,13 +61,39 @@ def main():
     tmpcover = os.environ.get("_JUKEBOX_PREVTMP", "/tmp/jukebox-fzf-prev.jpg")
 
     # --- Probe all metadata in one shot ---
-    raw = run(["ffprobe", "-v", "quiet", "-print_format", "json",
-               "-show_format", "-show_streams", "--", filepath])
+    raw = ""
+    if not is_remote:
+        raw = run(["ffprobe", "-v", "quiet", "-print_format", "json",
+                   "-show_format", "-show_streams", "--", filepath])
     data = {}
     if raw:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
+            pass
+
+    # Jellyfin metadata is already cached during the single API sync.  Reading
+    # it here avoids downloading/probing the audio stream for every fzf move.
+    if is_remote:
+        cache_path = os.environ.get("_JUKEBOX_CACHE", "")
+        try:
+            with open(cache_path, encoding="utf-8") as cache:
+                for line in cache:
+                    fields = line.rstrip("\n").split("\t")
+                    if len(fields) >= 8 and fields[0] == filepath:
+                        data = {
+                            "format": {
+                                "duration": fields[5],
+                                "tags": {
+                                    "title": fields[1], "artist": fields[2],
+                                    "album": fields[3], "date": fields[4],
+                                    "track": fields[6], "disc": fields[7],
+                                },
+                            },
+                            "streams": [],
+                        }
+                        break
+        except OSError:
             pass
 
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
@@ -194,10 +221,20 @@ def main():
     if art_h >= 3 and art_w >= 8 and remaining >= 3:
         print()
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-v", "quiet", "-i", filepath,
-                 "-an", "-vcodec", "mjpeg", "-frames:v", "1", tmpcover],
-                timeout=10, capture_output=True)
+            try:
+                os.unlink(tmpcover)
+            except FileNotFoundError:
+                pass
+            if is_remote:
+                helper = os.path.join(os.environ.get("_JUKEBOX_SCRIPT_DIR", ""), "jellyfin_client.py")
+                subprocess.run(
+                    [sys.executable, helper, "art", filepath, tmpcover],
+                    timeout=10, capture_output=True)
+            else:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "quiet", "-i", filepath,
+                     "-an", "-vcodec", "mjpeg", "-frames:v", "1", tmpcover],
+                    timeout=10, capture_output=True)
             if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
                 script_dir = os.environ.get("_JUKEBOX_SCRIPT_DIR", "")
                 fallback = os.path.join(script_dir, "assets", "NO-COVER.png")

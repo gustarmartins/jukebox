@@ -17,7 +17,9 @@
 # ╚══════════════════════════════════════════════════════════════════╝
 
 : ${JUKEBOX_MUSIC_DIR:="$HOME/Music"}
+: ${JUKEBOX_SOURCE:="local"}
 _JUKEBOX_SCRIPT_DIR="${0:A:h}"
+_JUKEBOX_JELLYFIN_CLIENT="${_JUKEBOX_SCRIPT_DIR}/jellyfin_client.py"
 
 # --- fzf preview command (calls external Python script) ---
 _jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
@@ -30,6 +32,30 @@ jukebox() {
     local _jukebox_debug=0
     local _jukebox_debuglog="/tmp/jukebox-debug.log"
     local _jukebox_show_formatnames=1
+    local _jukebox_source="${JUKEBOX_SOURCE:l}"
+
+    # Connection management intentionally runs before any player temp files or
+    # terminal state are created.
+    case "$1" in
+        jellyfin-login)
+            shift
+            command python3 "$_JUKEBOX_JELLYFIN_CLIENT" login "$@"
+            return $?
+            ;;
+        jellyfin-status)
+            command python3 "$_JUKEBOX_JELLYFIN_CLIENT" status
+            return $?
+            ;;
+        jellyfin-logout)
+            command python3 "$_JUKEBOX_JELLYFIN_CLIENT" logout
+            return $?
+            ;;
+    esac
+
+    if [[ "$_jukebox_source" != "local" && "$_jukebox_source" != "jellyfin" ]]; then
+        echo "❌ JUKEBOX_SOURCE must be 'local' or 'jellyfin'"
+        return 1
+    fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -67,6 +93,7 @@ jukebox() {
     command rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
     command rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
     command rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
+    command rm -f /tmp/jukebox-mpv-auth-*.conf(N) 2>/dev/null
     command rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
     command rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
     command rm -f "${XDG_RUNTIME_DIR:-/tmp}"/jukebox-mpv-*.sock(N) 2>/dev/null
@@ -94,8 +121,12 @@ jukebox() {
     local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
     local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
     local queuefile="/tmp/jukebox-queue-$$.txt"
+    local mpv_auth_config=""
     mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/jukebox"
     local cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
+    if [[ "$_jukebox_source" == "jellyfin" ]]; then
+        cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata-jellyfin.tsv"
+    fi
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
     export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
@@ -109,6 +140,15 @@ jukebox() {
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
 
+    local _cache_pid=""
+    local _watcher_pid=""
+
+    if [[ "$_jukebox_source" == "jellyfin" ]]; then
+        echo "⏳ Syncing Jellyfin music library..."
+        if ! "$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" sync --cache "$cachefile"; then
+            return 1
+        fi
+    else
     # --- build/update persistent metadata cache (incremental) ---
     # On first run: full scan. On subsequent runs: only probe NEW files,
     # remove entries for DELETED files. Makes repeated launches near-instant.
@@ -177,10 +217,9 @@ with open(cache_path, 'w') as out:
 if new_files or deleted:
     print(f'Cache: +{len(new_files)} new, -{len(deleted)} removed', file=sys.stderr)
 " "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" "$cachefile" &
-    local _cache_pid=$!
+    _cache_pid=$!
 
     # --- live directory watcher (detects new .flac files during playback) ---
-    local _watcher_pid=""
     if command -v inotifywait >/dev/null 2>&1; then
         (
             inotifywait -m -r -e close_write,moved_to --format '%w%f' \
@@ -221,6 +260,7 @@ except: pass
             done
         ) &
         _watcher_pid=$!
+    fi
     fi
 
     _jukebox_setup_fzf_sort() {
@@ -292,6 +332,27 @@ SORTEOF
         fi
     }
 
+    _jukebox_source_files() {
+        local order="${1:-original}"
+        if [[ "$_jukebox_source" == "jellyfin" ]]; then
+            case "$order" in
+                name_asc)  sort -t$'\t' -k2,2f "$cachefile" | cut -f1 ;;
+                name_desc) sort -t$'\t' -k2,2fr "$cachefile" | cut -f1 ;;
+                date_asc)  sort -t$'\t' -k5,5n -k4,4f -k8,8n -k7,7n "$cachefile" | cut -f1 ;;
+                date_desc) sort -t$'\t' -k5,5nr -k4,4f -k8,8n -k7,7n "$cachefile" | cut -f1 ;;
+                *) cut -f1 "$cachefile" ;;
+            esac
+        else
+            case "$order" in
+                name_asc)  printf '%s\n' "$musicdir"/**/*.flac(N.on) ;;
+                name_desc) printf '%s\n' "$musicdir"/**/*.flac(N.On) ;;
+                date_asc)  printf '%s\n' "$musicdir"/**/*.flac(N.Om) ;;
+                date_desc) printf '%s\n' "$musicdir"/**/*.flac(N.om) ;;
+                *) printf '%s\n' "$musicdir"/**/*.flac(N.) ;;
+            esac
+        fi
+    }
+
     local choice files=() start_idx=0
     local musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
 
@@ -309,15 +370,15 @@ SORTEOF
     read "choice?Choose [1-8, q]: "
 
     case "$choice" in
-        1) files=("$musicdir"/**/*.flac(N.)) ;;
-        2) files=("$musicdir"/**/*.flac(N.on)) ;;
-        3) files=("$musicdir"/**/*.flac(N.On)) ;;
-        4) files=("$musicdir"/**/*.flac(N.Om)) ;;
-        5) files=("$musicdir"/**/*.flac(N.om)) ;;
+        1) files=("${(@f)$(_jukebox_source_files original)}") ;;
+        2) files=("${(@f)$(_jukebox_source_files name_asc)}") ;;
+        3) files=("${(@f)$(_jukebox_source_files name_desc)}") ;;
+        4) files=("${(@f)$(_jukebox_source_files date_asc)}") ;;
+        5) files=("${(@f)$(_jukebox_source_files date_desc)}") ;;
         6)
-            local all_files=("$musicdir"/**/*.flac(N.on))
+            local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
             if [[ ${#all_files[@]} -eq 0 ]]; then
-                echo "No FLAC files found in $musicdir"
+                echo "No music found in the $_jukebox_source library"
                 return 1
             fi
             
@@ -372,8 +433,10 @@ _jukebox_rate_track() {
                     --expect=enter,alt-s \
                     "${_fzf_binds[@]}")
                     
-            command rm -rf "$_fzf_sort_dir"
-            [[ -z "$output" ]] && return
+            if [[ -z "$output" ]]; then
+                command rm -rf "$_fzf_sort_dir"
+                return
+            fi
             
             local key_pressed=$(echo "$output" | head -n 1)
             local selected=$(echo "$output" | sed '1d')
@@ -388,6 +451,7 @@ _jukebox_rate_track() {
                 sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
                 all_files=("${(@f)sorted_paths}")
             fi
+            command rm -rf "$_fzf_sort_dir"
             
             # Extract first column (filepath)
             local picked_arr=("${(@f)${$(echo "$selected" | cut -f1)}}")
@@ -423,7 +487,7 @@ _jukebox_rate_track() {
             start_idx=0
             ;;
         7)
-            local -a _tmp=("$musicdir"/**/*.flac(N.))
+            local -a _tmp=("${(@f)$(_jukebox_source_files original)}")
             local i j tmp_val
             for ((i=${#_tmp[@]}; i>1; i--)); do
                 j=$((RANDOM % i + 1))
@@ -434,9 +498,9 @@ _jukebox_rate_track() {
             files=("${_tmp[@]}")
             ;;
         8)
-            local all_files=("$musicdir"/**/*.flac(N.on))
+            local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
             if [[ ${#all_files[@]} -eq 0 ]]; then
-                echo "No FLAC files found in $musicdir"
+                echo "No music found in the $_jukebox_source library"
                 return 1
             fi
             
@@ -483,7 +547,7 @@ _jukebox_rate_track() {
     esac
 
     if [[ ${#files[@]} -eq 0 ]]; then
-        echo "No FLAC files found in $musicdir"
+        echo "No music found in the $_jukebox_source library"
         return 1
     fi
 
@@ -518,6 +582,7 @@ _jukebox_rate_track() {
         fi
         # Remove session-specific temp files (persistent cache is kept!)
         command rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
+        [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
         command rm -f "/tmp/jukebox-sort-state-$$"
         command rm -rf "$_fzf_sort_dir"
         # Remove log files that accumulate across sessions
@@ -530,7 +595,9 @@ _jukebox_rate_track() {
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_log _jukebox_setup_fzf_sort 2>/dev/null
+                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
+                   _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
+                   _jukebox_log _jukebox_setup_fzf_sort 2>/dev/null
     }
     setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM HUP QUIT PIPE EXIT
@@ -542,7 +609,17 @@ _jukebox_rate_track() {
     # the disk head -> audible lag/stutter. Pull each track fully into RAM up
     # front and preload the next playlist entry while the current one plays, so
     # the HDD is touched once per track instead of continuously.
+    local -a _mpv_auth_args=()
+    if [[ "$_jukebox_source" == "jellyfin" ]]; then
+        mpv_auth_config=$(mktemp /tmp/jukebox-mpv-auth-XXXXXX.conf)
+        chmod 600 "$mpv_auth_config"
+        if ! "$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" mpv-config "$mpv_auth_config"; then
+            return 1
+        fi
+        _mpv_auth_args=(--include="$mpv_auth_config")
+    fi
     env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
+        "${_mpv_auth_args[@]}" \
         --audio-format=s32 \
         --audio-samplerate=0 \
         --keep-open=no \
@@ -571,6 +648,9 @@ _jukebox_rate_track() {
         _jukebox_log "mpv: FAILED — socket never appeared"
         return 1
     fi
+    # mpv has consumed the private auth options; keeping the token-bearing file
+    # around for the whole session would only widen its exposure window.
+    [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
 
     # --- IPC helper using python for reliable Unix socket communication ---
 
@@ -637,6 +717,10 @@ _jukebox_rate_track() {
     local _render_pl_pos=0 _render_pl_count=0
     local _render_time_pos=0 _render_duration=0 _render_paused=""
     local _render_speed=1.0 _render_pitch=1.0 _render_apc="true"
+    local _source_title="" _source_artist="" _source_album=""
+    local _current_meta="" _cm_date="" _cm_dur="" _cm_track="" _cm_disc=""
+    local _lyrics_mode=0 _lyrics_loaded_path="" _lyrics_active_index=0 _lyrics_previous_index=0
+    local -a _lyrics_starts=() _lyrics_lines=()
     local _jukebox_last_next_file=""
     local _jukebox_next_retries=0
     local _nav_offset=0
@@ -650,6 +734,13 @@ _jukebox_rate_track() {
         _retries=$((_retries + 1))
     done
     if [[ -n "$_render_path" ]]; then
+        if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+            _current_meta=$("$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" cache-row --cache "$cachefile" "$_render_path" 2>/dev/null)
+            IFS=$'\x1f' read -r _source_title _source_artist _source_album _cm_date _cm_dur _cm_track _cm_disc <<< "$_current_meta"
+            [[ -z "$_render_title" ]] && _render_title="$_source_title"
+            [[ -z "$_render_artist" ]] && _render_artist="$_source_artist"
+            [[ -z "$_render_album" ]] && _render_album="$_source_album"
+        fi
         _jukebox_extract_art "$_render_path"
         _jukebox_cache_art
     else
@@ -718,12 +809,18 @@ _jukebox_rate_track() {
                     force_redraw=1
                     ;;
                 'j')
-                    if (( _render_pl_pos + 1 + _nav_offset < _render_pl_count - 1 )); then
+                    if (( _lyrics_mode && ${#_lyrics_lines[@]} > 0 && ${_lyrics_starts[1]:--1} < 0 )); then
+                        (( _lyrics_active_index < ${#_lyrics_lines[@]} )) && _lyrics_active_index=$((_lyrics_active_index + 1))
+                        force_redraw=1
+                    elif (( _render_pl_pos + 1 + _nav_offset < _render_pl_count - 1 )); then
                         _nav_offset=$((_nav_offset + 1)); _jukebox_last_next_file=""; force_redraw=1
                     fi
                     ;;
                 'k')
-                    if (( _nav_offset > 0 )); then
+                    if (( _lyrics_mode && ${#_lyrics_lines[@]} > 0 && ${_lyrics_starts[1]:--1} < 0 )); then
+                        (( _lyrics_active_index > 1 )) && _lyrics_active_index=$((_lyrics_active_index - 1))
+                        force_redraw=1
+                    elif (( _nav_offset > 0 )); then
                         _nav_offset=$((_nav_offset - 1)); _jukebox_last_next_file=""; force_redraw=1
                     fi
                     ;;
@@ -750,6 +847,15 @@ _jukebox_rate_track() {
                     _jukebox_next_retries=0
                     force_redraw=1
                     ;;
+                'Y'|'y')
+                    if (( _lyrics_mode )); then
+                        _lyrics_mode=0
+                    else
+                        _lyrics_mode=1
+                        [[ "$_lyrics_loaded_path" != "$_render_path" ]] && _jukebox_load_lyrics "$_render_path"
+                    fi
+                    force_redraw=1
+                    ;;
                 'i'|'I')
                     # Show detailed FLAC file info overlay
                     if [[ -n "$_render_path" ]]; then
@@ -757,9 +863,28 @@ _jukebox_rate_track() {
                         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
                         echo ""
                         echo "╔════════════════════════════════════════════════════════════╗"
-                        echo "║  ℹ️  FLAC File Info                                       ║"
+                        echo "║  ℹ️  Music Source Info                                    ║"
                         echo "╚════════════════════════════════════════════════════════════╝"
                         echo ""
+                        if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+                            echo "  🌐 Source:   Jellyfin direct stream"
+                            echo "  🎵 Title:    ${_render_title:-Unknown}"
+                            echo "  🎤 Artist:   ${_render_artist:-Unknown}"
+                            echo "  💿 Album:    ${_render_album:-Unknown}"
+                            [[ -n "$_cm_date" && "$_cm_date" != "0" ]] && echo "  📅 Year:     $_cm_date"
+                            if [[ -n "$_cm_dur" ]]; then
+                                echo "  ⏱️  Duration: $(printf "%d:%02d" $((${_cm_dur%.*} / 60)) $((${_cm_dur%.*} % 60)))"
+                            fi
+                            echo ""
+                            echo "  The access token is sent as a private HTTP header."
+                            echo ""
+                            echo "  ── Press any key to return ──"
+                            read -rs -k 1
+                            printf '\e[?1049h\e[?25l'
+                            stty -echo -icanon min 0 time 0 2>/dev/null
+                            force_redraw=1
+                            continue
+                        fi
                         # File path
                         local _info_basename="${_render_path##*/}"
                         local _info_dir="${_render_path%/*}"
@@ -915,6 +1040,9 @@ _jukebox_rate_track() {
         _render_title="$_p_title"
         _render_artist="$_p_artist"
         _render_album="$_p_album"
+        [[ -z "$_render_title" ]] && _render_title="$_source_title"
+        [[ -z "$_render_artist" ]] && _render_artist="$_source_artist"
+        [[ -z "$_render_album" ]] && _render_album="$_source_album"
         _render_speed="$_p_speed"
         _render_pitch="$_p_pitch"
         _render_apc="$_p_apc"
@@ -922,12 +1050,26 @@ _jukebox_rate_track() {
         # 4. Handle track change
         if [[ -n "$_render_path" && "$_render_path" != "$last_path" ]]; then
             last_path="$_render_path"
+            _source_title=""; _source_artist=""; _source_album=""
+            if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+                _current_meta=$("$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" cache-row --cache "$cachefile" "$_render_path" 2>/dev/null)
+                IFS=$'\x1f' read -r _source_title _source_artist _source_album _cm_date _cm_dur _cm_track _cm_disc <<< "$_current_meta"
+                [[ -z "$_render_title" ]] && _render_title="$_source_title"
+                [[ -z "$_render_artist" ]] && _render_artist="$_source_artist"
+                [[ -z "$_render_album" ]] && _render_album="$_source_album"
+            fi
             _nav_offset=0
             _jukebox_extract_art "$_render_path"
             _jukebox_cache_art
             _jukebox_last_next_file=""
             _jukebox_next_retries=0
             _jukebox_clear_next_meta
+            _lyrics_loaded_path=""
+            if (( _lyrics_mode )); then
+                _jukebox_load_lyrics "$_render_path"
+            else
+                _lyrics_starts=(); _lyrics_lines=(); _lyrics_active_index=0
+            fi
             force_redraw=1
         fi
 
@@ -952,7 +1094,14 @@ _jukebox_rate_track() {
             fi
         fi
 
-        # 6. Render or partial update
+        # 6. Synchronized lyrics redraw only when the active line changes.
+        if (( _lyrics_mode && ${#_lyrics_lines[@]} > 0 )); then
+            _lyrics_previous_index=$_lyrics_active_index
+            _jukebox_update_lyric_index
+            (( _lyrics_active_index != _lyrics_previous_index )) && force_redraw=1
+        fi
+
+        # 7. Render or partial update
         if (( force_redraw )); then
             _jukebox_render
             force_redraw=0
@@ -993,7 +1142,7 @@ _jukebox_rate_track() {
 
         fi  # end of _tick % 5 == 0 || force_redraw
 
-        # 7. Sleep for next tick
+        # 8. Sleep for next tick
         sleep 0.05
     done
     _jukebox_cleanup

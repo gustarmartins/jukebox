@@ -1,6 +1,7 @@
 # Jukebox
 
-Terminal FLAC Player with Kitty graphics for album art!
+Terminal music player with local FLAC and first-class Jellyfin streaming, Kitty
+graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 
 > [!IMPORTANT]
 > This project was entirely created by LLMs and should not be used as a production-ready application. Please do not expect support or maintenance from its creators.
@@ -15,6 +16,8 @@ Terminal FLAC Player with Kitty graphics for album art!
 - Interactive Queue Editor (Jump to tracks, delete from queue)
 - Headless `mpv` rendering via Unix Socket IPC with fast-polling (`socat`)
 - `chafa` integration for high-quality Kitty terminal graphics over album art
+- Jellyfin library browsing and direct streaming over LAN or Tailscale
+- Local sidecar/embedded lyrics and Jellyfin synchronized lyrics (`Y`)
 
 ## Dependencies
 - `mpv`: Used entirely headless as an audio backend.
@@ -33,3 +36,15 @@ To configure your music folder, define the variable before sourcing:
 ```bash
 export JUKEBOX_MUSIC_DIR="$HOME/Music"
 ```
+
+For Jellyfin, authenticate once and select the remote source:
+
+```zsh
+jukebox jellyfin-login http://arch-desktop:8096
+export JUKEBOX_SOURCE=jellyfin
+```
+
+Use the desktop's `100.x.y.z` Tailscale address instead when MagicDNS is not
+enabled. The per-user access token is stored in
+`~/.config/jukebox/jellyfin.json` with mode `0600` and is never written into a
+playlist URL.

@@ -1,6 +1,8 @@
 # 🎵 Jukebox
 
-A terminal-based FLAC music player for zsh. Browse your library with fuzzy search, build custom queues, see album art in the terminal, and control playback — all without leaving the command line.
+A terminal-based music player for zsh. Browse local FLAC files or a Jellyfin
+music library, build custom queues, see album art and synchronized lyrics in
+the terminal, and control playback without leaving the command line.
 
 ## Features
 
@@ -10,6 +12,8 @@ A terminal-based FLAC music player for zsh. Browse your library with fuzzy searc
 - **Queue builder** — TAB to pick songs, Ctrl-A to select all, build your own playlist
 - **Live queue picker** — press `L` during playback to see the queue and jump to any track
 - **Keyboard controls** — seek, skip, speed up/down, all from the keyboard
+- **Jellyfin streaming** — browse and direct-stream a server over LAN or Tailscale
+- **Lyrics** — `.lrc`, `.elrc`, `.txt`, embedded tags, and Jellyfin lyrics
 
 ## Dependencies
 
@@ -77,6 +81,58 @@ source ~/jukebox/jukebox.zsh
 
 Default: `~/Music`
 
+### Jellyfin over LAN or Tailscale
+
+Log in once using the URL that is reachable from the laptop:
+
+```zsh
+jukebox jellyfin-login http://arch-desktop:8096
+```
+
+If Tailscale MagicDNS is unavailable, use the server's Tailscale IP instead:
+
+```zsh
+jukebox jellyfin-login http://100.x.y.z:8096
+```
+
+Then choose Jellyfin as the library source before sourcing or launching the
+player:
+
+```zsh
+export JUKEBOX_SOURCE=jellyfin
+source "$HOME/Software Repositories/gustarmartins/Jukebox/jukebox/jukebox.zsh"
+jukebox
+```
+
+`JUKEBOX_SOURCE` accepts `local` (the default) or `jellyfin`. Useful connection
+commands are:
+
+```zsh
+jukebox jellyfin-status
+jukebox jellyfin-logout
+```
+
+The login creates `~/.config/jukebox/jellyfin.json` with permissions `0600`.
+Jukebox generates token-free stream URLs and passes the token to `mpv` through
+a private, short-lived configuration file. Environment overrides are available
+for non-interactive setups: `JUKEBOX_JELLYFIN_URL`,
+`JUKEBOX_JELLYFIN_TOKEN`, and `JUKEBOX_JELLYFIN_USER_ID`.
+
+Jellyfin playback uses the original audio stream (`static=true`) and therefore
+does not intentionally transcode or reduce quality.
+
+### Lyrics
+
+Press `Y` during playback to toggle the dedicated lyrics view. Synchronized
+lyrics highlight the current line and redraw only when that line changes, so
+the ordinary render loop remains lightweight. For unsynchronized lyrics,
+`j`/`k` scroll down/up while the lyrics view is open.
+
+For local music, Jukebox checks for a same-name `.lrc`, `.elrc`, or `.txt` file
+beside the track and then falls back to embedded `LYRICS`/`UNSYNCEDLYRICS` tags.
+For Jellyfin, it uses the server's lyrics endpoint. Jellyfin recognizes the
+same sidecar naming convention, for example `Song.flac` with `Song.lrc`.
+
 ## Usage
 
 Run `jukebox` and pick a mode:
@@ -104,6 +160,7 @@ Run `jukebox` and pick a mode:
 | `,` / `.` | Previous / next track |
 | `<` / `>` | Previous / next track (same keys with Shift) |
 | `L` | Open queue picker (fzf) — jump to any track |
+| `Y` | Toggle lyrics view |
 | `[` / `]` | Decrease / increase playback speed |
 | `Backspace` | Reset speed to 1.0× |
 | `q` | Quit |
@@ -120,7 +177,7 @@ Run `jukebox` and pick a mode:
 ## Notes
 
 - **Linux only** — uses GNU `find -printf` for date sorting. Not compatible with macOS.
-- **FLAC files only** — scans for `*.flac` files in your music directory.
+- **Local mode is FLAC-only** — Jellyfin mode supports the audio formats exposed by the server.
 - Album art is extracted from embedded metadata (most FLAC files have it).
 
 ### Known Limits

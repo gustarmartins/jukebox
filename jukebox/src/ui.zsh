@@ -257,7 +257,7 @@
         if [[ "$_layout_mode" == "normal" ]]; then
             # Full header: 2 control lines + info + album + track
             local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  [/]=adj  P=mode:${_rt_mode}"
-            local controls2="A=add next  L=queue  j/k=nav next  i=info  ENTER=play nav  q=quit"
+            local controls2="A=add next  L=queue  Y=lyrics  j/k=nav next  i=info  ENTER=play nav  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
             printf '\e[2;1H'
@@ -275,7 +275,7 @@
 
         elif [[ "$_layout_mode" == "compact" ]]; then
             # Compact: 1 control line + info with track
-            local controls_compact="A=add  L=que  j/k=nav  i=info  ENTER=play  P=mode:${_rt_mode}  q=quit"
+            local controls_compact="A=add  L=que  Y=lyrics  j/k=nav  i=info  P=mode:${_rt_mode}  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
             printf '\e[0m'
@@ -295,16 +295,20 @@
             cur_row=2
         fi
 
-        # --- Album art (positioned by layout engine) ---
-        if [[ -n "$_jukebox_art_text" ]]; then
-            printf '\e[%d;1H%s' "$_layout_art_start_row" "$_jukebox_art_text"
-        fi
+        if (( _lyrics_mode )); then
+            _jukebox_render_lyrics "$cols" "$_layout_art_start_row" "$((rows - 1))"
+        else
+            # --- Album art (positioned by layout engine) ---
+            if [[ -n "$_jukebox_art_text" ]]; then
+                printf '\e[%d;1H%s' "$_layout_art_start_row" "$_jukebox_art_text"
+            fi
 
-        # --- "Up Next" panel (layout-driven placement with bounds) ---
-        if [[ -n "$pl_pos" && "$_layout_next_mode" != "hidden" ]]; then
-            local panel_max_y=$(( rows - 1 ))   # never overwrite progress bar
-            local panel_max_w=$(( cols - _layout_next_x - 1 ))
-            _jukebox_render_next_panel "$_layout_next_x" "$_layout_next_y" "$panel_max_y" "$panel_max_w"
+            # --- "Up Next" panel (layout-driven placement with bounds) ---
+            if [[ -n "$pl_pos" && "$_layout_next_mode" != "hidden" ]]; then
+                local panel_max_y=$(( rows - 1 ))   # never overwrite progress bar
+                local panel_max_w=$(( cols - _layout_next_x - 1 ))
+                _jukebox_render_next_panel "$_layout_next_x" "$_layout_next_y" "$panel_max_y" "$panel_max_w"
+            fi
         fi
 
         # progress at bottom

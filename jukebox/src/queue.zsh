@@ -14,7 +14,7 @@
         fi
 
         # default list: setup using shared helper
-        local tmp_files=("$musicdir"/**/*.flac(N.on))
+        local tmp_files=("${(@f)$(_jukebox_source_files name_asc)}")
         local input_list
         input_list=$(_jukebox_get_input_list "${tmp_files[@]}")
 
