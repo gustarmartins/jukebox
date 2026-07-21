@@ -37,6 +37,8 @@ Jukebox is a **single-file Zsh function** (`jukebox.zsh`) that runs as a TUI mus
 | What | Where | Persistent? |
 |------|-------|---|
 | Metadata cache | `~/.cache/jukebox/metadata.tsv` | ✅ Yes |
+| Session state | `~/.cache/jukebox/session[-jellyfin].state` | ✅ Yes |
+| Session queue | `~/.cache/jukebox/session[-jellyfin].m3u` | ✅ Yes |
 | Playlist | `/tmp/jukebox-XXXXXX.m3u` | No |
 | mpv IPC socket | `$XDG_RUNTIME_DIR/jukebox-mpv-XXXXXX.sock` | No |
 | Cover art (current) | `/tmp/jukebox-cover-XXXXXX.jpg` | No |
@@ -117,6 +119,34 @@ The metadata cache at `~/.cache/jukebox/metadata.tsv` is **persistent** and **in
 
 ---
 
+## Session Persistence (`src/session.zsh`)
+
+Playback position is snapshotted to `~/.cache/jukebox/session.state` (and the
+live queue to `session.m3u`) about every 2 seconds from the main loop, plus on
+every track change and queue edit. Option `0` in the launch menu resumes it.
+
+The whole point is surviving events where the exit trap CANNOT run (SIGKILL,
+OOM-kill, power loss). Therefore:
+
+**Rule:** Never make saving depend on `_jukebox_cleanup` — the periodic save in
+the main loop is the primary mechanism; cleanup only re-saves with `ended=clean`.
+
+**Rule:** Writes must stay atomic (`> $file.tmp.$$` then `mv -f`). A half-written
+state file is exactly the failure mode this feature would otherwise create.
+
+**Rule:** `_jukebox_load_state` must tolerate garbage — every field used in
+arithmetic is validated with `[[ $v == <-> ]]` before use, because a truncated
+snapshot is a normal input, not a bug.
+
+**Rule:** These files live in the persistent cache dir on purpose. Do NOT move
+them to `/tmp/` (they must survive reboots) and do NOT delete them in cleanup or
+in the startup sweep — only stale `session*.tmp.*` fragments are swept.
+
+**Rule:** Resume starts mpv with `--pause=yes` so the seek lands before audio.
+Any new early-return path after that MUST still unpause.
+
+---
+
 ## Cleanup System
 
 The cleanup system has three layers:
@@ -142,5 +172,7 @@ Before pushing any change, mentally verify:
 - [ ] New exported env vars are unset in both startup sweep AND exit cleanup
 - [ ] New background processes are killed in `_jukebox_cleanup`
 - [ ] The persistent cache (`~/.cache/jukebox/metadata.tsv`) is never deleted
+- [ ] Session state files are never deleted by cleanup or the startup sweep
+- [ ] New playback state worth resuming is written by `_jukebox_save_state`
 
 Enjoy building!

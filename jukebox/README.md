@@ -139,6 +139,7 @@ Run `jukebox` and pick a mode:
 
 ```
 🎵 Jukebox - Select playback mode:
+  0) ▶ Resume: Young Turks — Rod Stewart  [0:26/5:02 · track 3/40 · interrupted]
   1) Play all (original order)
   2) Sort by filename (A-Z)
   3) Sort by filename (Z-A)
@@ -147,8 +148,27 @@ Run `jukebox` and pick a mode:
   6) Browse & pick (plays from selection onward)
   7) Shuffle
   8) Build queue (TAB to pick, ENTER to play)
+  x) Forget saved session
   q) Quit
 ```
+
+### Resuming a session
+
+Jukebox writes a snapshot of what it is playing to
+`~/.cache/jukebox/session.state` (plus `session.m3u` for the queue) roughly
+every two seconds. The write is atomic and never depends on a clean exit, so a
+`SIGKILL`, an OOM-kill, a closed terminal, or a reboot all still leave a
+resumable session behind.
+
+On the next launch, option `0` appears at the top of the menu. Picking it
+restores the whole queue (including anything added with `A` or reordered in the
+queue picker), jumps to the track you were on, seeks back to the exact second,
+and restores speed/pitch/lyrics-view state. Playback starts paused internally
+so you never hear the beginning of the track before the seek lands.
+
+Sessions are tracked per source — a local session and a Jellyfin session are
+saved separately, and only the one matching your current `JUKEBOX_SOURCE` is
+offered. Option `x` deletes the saved session.
 
 ### Playback controls
 

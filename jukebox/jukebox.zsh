@@ -124,9 +124,23 @@ jukebox() {
     local mpv_auth_config=""
     mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/jukebox"
     local cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
+    local _jukebox_state_file="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session.state"
+    local _jukebox_state_playlist="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session.m3u"
     if [[ "$_jukebox_source" == "jellyfin" ]]; then
         cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata-jellyfin.tsv"
+        _jukebox_state_file="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session-jellyfin.state"
+        _jukebox_state_playlist="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session-jellyfin.m3u"
     fi
+    # Half-written snapshots from a session that died mid-save (the exact
+    # scenario this feature guards against) never get an atomic mv.
+    command rm -f "${XDG_CACHE_HOME:-$HOME/.cache}"/jukebox/session*.tmp.*(N) 2>/dev/null
+
+    # Saved-session state, populated by _jukebox_load_state (src/session.zsh).
+    local _jukebox_resuming=0
+    local _resume_source="" _resume_ended="" _resume_pos=0 _resume_count=0
+    local _resume_time=0 _resume_duration=0 _resume_speed="1.0" _resume_pitch="1.0"
+    local _resume_apc="true" _resume_rtmode="tempo" _resume_lyrics=0
+    local _resume_path="" _resume_title="" _resume_artist="" _resume_album=""
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
     export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
@@ -356,7 +370,13 @@ SORTEOF
     local choice files=() start_idx=0
     local musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
 
+    local _resume_available=0
+    _jukebox_load_state && _resume_available=1
+
     echo "🎵 Jukebox - Select playback mode:"
+    if (( _resume_available )); then
+        echo "  0) ▶ Resume: $(_jukebox_resume_label)"
+    fi
     echo "  1) Play all (original order)"
     echo "  2) Sort by filename (A-Z)"
     echo "  3) Sort by filename (Z-A)"
@@ -365,11 +385,38 @@ SORTEOF
     echo "  6) Browse & pick (plays from selection onward)"
     echo "  7) Shuffle"
     echo "  8) Build queue (TAB to pick, ENTER to play)"
+    (( _resume_available )) && echo "  x) Forget saved session"
     echo "  q) Quit"
     echo ""
-    read "choice?Choose [1-8, q]: "
+    if (( _resume_available )); then
+        read "choice?Choose [0-8, x, q]: "
+    else
+        read "choice?Choose [1-8, q]: "
+    fi
 
     case "$choice" in
+        0|r|R)
+            if (( ! _resume_available )); then
+                echo "Nothing to resume"
+                return 1
+            fi
+            files=("${(@f)$(<"$_jukebox_state_playlist")}")
+            files=("${(@)files:#}")   # drop blank lines
+            if [[ ${#files[@]} -eq 0 ]]; then
+                echo "Saved session playlist is empty"
+                return 1
+            fi
+            start_idx=$_resume_pos
+            (( start_idx >= ${#files[@]} )) && start_idx=0
+            _jukebox_resuming=1
+            ;;
+        x|X)
+            if (( _resume_available )); then
+                command rm -f "$_jukebox_state_file" "$_jukebox_state_playlist" 2>/dev/null
+                echo "🗑  Saved session discarded"
+            fi
+            return
+            ;;
         1) files=("${(@f)$(_jukebox_source_files original)}") ;;
         2) files=("${(@f)$(_jukebox_source_files name_asc)}") ;;
         3) files=("${(@f)$(_jukebox_source_files name_desc)}") ;;
@@ -563,6 +610,8 @@ _jukebox_rate_track() {
         [[ -n "$_jukebox_cleaned" ]] && return
         _jukebox_cleaned=1
         (( ${+functions[_jukebox_log]} )) && _jukebox_log "cleanup: starting"
+        # Final session snapshot BEFORE mpv dies, flagged as a clean exit.
+        (( ${+functions[_jukebox_save_state]} )) && _jukebox_save_state clean
         # Clear Kitty graphics protocol images before leaving altscreen
         printf '\e_Ga=d;\e\\'
         printf '\e[?1049l\e[?25h'
@@ -597,7 +646,9 @@ _jukebox_rate_track() {
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
                    _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
-                   _jukebox_log _jukebox_setup_fzf_sort 2>/dev/null
+                   _jukebox_log _jukebox_setup_fzf_sort \
+                   _jukebox_save_state _jukebox_load_state _jukebox_snapshot_playlist \
+                   _jukebox_resume_label _jukebox_apply_resume 2>/dev/null
     }
     setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM HUP QUIT PIPE EXIT
@@ -618,8 +669,12 @@ _jukebox_rate_track() {
         fi
         _mpv_auth_args=(--include="$mpv_auth_config")
     fi
+    # When resuming, start paused so the seek to the saved position lands
+    # before a single sample of the track's beginning is heard.
+    local -a _mpv_resume_args=()
+    (( _jukebox_resuming )) && _mpv_resume_args=(--pause=yes)
     env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
-        "${_mpv_auth_args[@]}" \
+        "${_mpv_auth_args[@]}" "${_mpv_resume_args[@]}" \
         --ytdl=no \
         --audio-format=s32 \
         --audio-samplerate=0 \
@@ -721,6 +776,7 @@ _jukebox_rate_track() {
     local _source_title="" _source_artist="" _source_album=""
     local _current_meta="" _cm_date="" _cm_dur="" _cm_track="" _cm_disc=""
     local _lyrics_mode=0 _lyrics_loaded_path="" _lyrics_active_index=0 _lyrics_previous_index=0
+    (( _jukebox_resuming )) && _lyrics_mode=$_resume_lyrics
     local -a _lyrics_starts=() _lyrics_lines=()
     local _jukebox_last_next_file=""
     local _jukebox_next_retries=0
@@ -744,10 +800,21 @@ _jukebox_rate_track() {
         fi
         _jukebox_extract_art "$_render_path"
         _jukebox_cache_art
+        (( _jukebox_resuming )) && _jukebox_apply_resume
     else
         _jukebox_calc_layout    # ensure layout vars exist even without a track
+        # mpv was started paused for the resume seek — never leave it stuck
+        # there just because the initial property fetch came back empty.
+        (( _jukebox_resuming )) && _jukebox_set '{"command":["set_property","pause",false]}'
     fi
     _jukebox_render
+
+    # Seed the crash-safe session snapshot before the first poll tick, so a
+    # kill in the next second still resumes at the right track.
+    _render_pl_pos=$start_idx
+    (( _jukebox_resuming )) && _render_time_pos=$_resume_time
+    command cp -f "$playlist" "$_jukebox_state_playlist" 2>/dev/null
+    _jukebox_save_state
 
     # track state for change detection
     local last_path="$_render_path"
@@ -762,6 +829,7 @@ _jukebox_rate_track() {
     local _tick=0 key="" seq="" _drain="" new_cols new_rows _est_next _poll_batch pos dur pos_i dur_i pos_m pos_s dur_m dur_s time_str icon label bar_w bar filled empty
     local _p_path _p_paused _p_count _p_pos _p_time _p_dur _p_title _p_artist _p_album _p_next_file _p_next_id _p_speed _p_pitch _p_apc
     local _rt_mode="tempo"
+    (( _jukebox_resuming )) && [[ -n "$_resume_rtmode" ]] && _rt_mode="$_resume_rtmode"
 
     while kill -0 "$_jukebox_mpv_pid" 2>/dev/null; do
         # 1. Handle Input (non-blocking, fast drain)
@@ -840,12 +908,14 @@ _jukebox_rate_track() {
                     _jukebox_add_next
                     _jukebox_last_next_file=""
                     _jukebox_next_retries=0
+                    _jukebox_snapshot_playlist   # queue changed — persist it
                     force_redraw=1
                     ;;
                 'L'|'l')
                     _jukebox_queue_picker
                     _jukebox_last_next_file=""
                     _jukebox_next_retries=0
+                    _jukebox_snapshot_playlist   # queue may have been edited
                     force_redraw=1
                     ;;
                 'Y'|'y')
@@ -1071,11 +1141,18 @@ _jukebox_rate_track() {
             else
                 _lyrics_starts=(); _lyrics_lines=(); _lyrics_active_index=0
             fi
+            _jukebox_save_state
             force_redraw=1
         fi
 
         if [[ "$_render_paused" != "$last_paused" ]]; then
             last_paused="$_render_paused"
+        fi
+
+        # 4b. Persist playback position (~every 2s) — the snapshot a
+        # force-stop, reboot or OOM-kill leaves behind for the next launch.
+        if (( _tick % 20 == 0 )); then
+            _jukebox_save_state
         fi
 
         # 5. Handle next-track data (Coming Up Next — fetched OUTSIDE render)
