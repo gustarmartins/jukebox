@@ -12,12 +12,17 @@
 # ║                                                                ║
 # ║  Configuration (optional, add before the source line):         ║
 # ║    export JUKEBOX_MUSIC_DIR="$HOME/Music"                      ║
+# ║    export JUKEBOX_DATA_DIR="$HOME/.jukebox-app"                ║
 # ║                                                                ║
 # ║  Usage: run `jukebox` in your terminal.                        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 : ${JUKEBOX_MUSIC_DIR:="$HOME/Music"}
 : ${JUKEBOX_SOURCE:="local"}
+# Own directory rather than ~/.cache/jukebox: the metadata cache and the saved
+# session are things you want back after a reboot, and ~/.cache is routinely
+# wiped by cleaners/tmpfiles — plus "jukebox" is a name other apps also use.
+: ${JUKEBOX_DATA_DIR:="$HOME/.jukebox-app"}
 _JUKEBOX_SCRIPT_DIR="${0:A:h}"
 _JUKEBOX_JELLYFIN_CLIENT="${_JUKEBOX_SCRIPT_DIR}/jellyfin_client.py"
 
@@ -122,18 +127,30 @@ jukebox() {
     local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
     local queuefile="/tmp/jukebox-queue-$$.txt"
     local mpv_auth_config=""
-    mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/jukebox"
-    local cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
-    local _jukebox_state_file="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session.state"
-    local _jukebox_state_playlist="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session.m3u"
+    local _jukebox_datadir="${JUKEBOX_DATA_DIR:-$HOME/.jukebox-app}"
+    mkdir -p "$_jukebox_datadir"
+    # One-time migration from the pre-0.x location. ~/.cache is fair game for
+    # cleaners (and shared with any other app named "jukebox"), so the library
+    # cache and saved sessions moved out of it. Existing files are carried over
+    # instead of being re-probed from scratch.
+    local _jukebox_olddir="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox" _mig_f
+    if [[ -d "$_jukebox_olddir" && "$_jukebox_olddir" != "$_jukebox_datadir" ]]; then
+        for _mig_f in "$_jukebox_olddir"/*(N); do
+            [[ -e "$_jukebox_datadir/${_mig_f:t}" ]] || command mv -f "$_mig_f" "$_jukebox_datadir/" 2>/dev/null
+        done
+        command rmdir "$_jukebox_olddir" 2>/dev/null
+    fi
+    local cachefile="$_jukebox_datadir/metadata.tsv"
+    local _jukebox_state_file="$_jukebox_datadir/session.state"
+    local _jukebox_state_playlist="$_jukebox_datadir/session.m3u"
     if [[ "$_jukebox_source" == "jellyfin" ]]; then
-        cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata-jellyfin.tsv"
-        _jukebox_state_file="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session-jellyfin.state"
-        _jukebox_state_playlist="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/session-jellyfin.m3u"
+        cachefile="$_jukebox_datadir/metadata-jellyfin.tsv"
+        _jukebox_state_file="$_jukebox_datadir/session-jellyfin.state"
+        _jukebox_state_playlist="$_jukebox_datadir/session-jellyfin.m3u"
     fi
     # Half-written snapshots from a session that died mid-save (the exact
     # scenario this feature guards against) never get an atomic mv.
-    command rm -f "${XDG_CACHE_HOME:-$HOME/.cache}"/jukebox/session*.tmp.*(N) 2>/dev/null
+    command rm -f "$_jukebox_datadir"/session*.tmp.*(N) 2>/dev/null
 
     # Saved-session state, populated by _jukebox_load_state (src/session.zsh).
     local _jukebox_resuming=0
@@ -1318,7 +1335,7 @@ HELPEOF
     if [[ -z "$_nc_input" ]]; then
         command -v fzf &>/dev/null || { echo "❌ fzf is required for the interactive picker"; return 1; }
 
-        local _nc_cachefile="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox/metadata.tsv"
+        local _nc_cachefile="${JUKEBOX_DATA_DIR:-$HOME/.jukebox-app}/metadata.tsv"
         local _nc_preview_cmd="'${_nc_script_dir}/_fzf_preview.py' {1}"
 
         local _nc_input_list=""

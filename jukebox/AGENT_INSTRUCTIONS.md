@@ -36,9 +36,9 @@ Jukebox is a **single-file Zsh function** (`jukebox.zsh`) that runs as a TUI mus
 ### File Locations
 | What | Where | Persistent? |
 |------|-------|---|
-| Metadata cache | `~/.cache/jukebox/metadata.tsv` | ✅ Yes |
-| Session state | `~/.cache/jukebox/session[-jellyfin].state` | ✅ Yes |
-| Session queue | `~/.cache/jukebox/session[-jellyfin].m3u` | ✅ Yes |
+| Metadata cache | `~/.jukebox-app/metadata.tsv` | ✅ Yes |
+| Session state | `~/.jukebox-app/session[-jellyfin].state` | ✅ Yes |
+| Session queue | `~/.jukebox-app/session[-jellyfin].m3u` | ✅ Yes |
 | Playlist | `/tmp/jukebox-XXXXXX.m3u` | No |
 | mpv IPC socket | `$XDG_RUNTIME_DIR/jukebox-mpv-XXXXXX.sock` | No |
 | Cover art (current) | `/tmp/jukebox-cover-XXXXXX.jpg` | No |
@@ -109,19 +109,22 @@ Some FLACs (especially from Tidal/Qobuz) embed cover art in non-standard sub-for
 
 ## Cache System
 
-The metadata cache at `~/.cache/jukebox/metadata.tsv` is **persistent** and **incremental**:
+The metadata cache at `~/.jukebox-app/metadata.tsv` is **persistent** and **incremental**:
 - Format: `filepath\ttitle\tartist\talbum\tdate\tduration` (tab-separated, 6 fields)
 - On launch, the Python builder diffs disk vs cache and only probes NEW files
 - An `inotifywait` background watcher hot-appends new files during playback
 - The cache is NEVER deleted on exit — only session temp files are cleaned up
 
-**Rule:** Do NOT move the cache back to `/tmp/`. Do NOT delete it in `_jukebox_cleanup`.
+**Rule:** Do NOT move the cache back to `/tmp/` or to `~/.cache/` (cache
+cleaners wipe it, and the name is shared with unrelated "jukebox" apps). It
+lives in `$JUKEBOX_DATA_DIR` (default `~/.jukebox-app`) together with the
+session state, and `_jukebox_cleanup` must never delete it.
 
 ---
 
 ## Session Persistence (`src/session.zsh`)
 
-Playback position is snapshotted to `~/.cache/jukebox/session.state` (and the
+Playback position is snapshotted to `~/.jukebox-app/session.state` (and the
 live queue to `session.m3u`) about every 2 seconds from the main loop, plus on
 every track change and queue edit. Option `0` in the launch menu resumes it.
 
@@ -171,7 +174,7 @@ Before pushing any change, mentally verify:
 - [ ] New temp files are cleaned up in both startup sweep AND exit cleanup
 - [ ] New exported env vars are unset in both startup sweep AND exit cleanup
 - [ ] New background processes are killed in `_jukebox_cleanup`
-- [ ] The persistent cache (`~/.cache/jukebox/metadata.tsv`) is never deleted
+- [ ] The persistent cache (`~/.jukebox-app/metadata.tsv`) is never deleted
 - [ ] Session state files are never deleted by cleanup or the startup sweep
 - [ ] New playback state worth resuming is written by `_jukebox_save_state`
 

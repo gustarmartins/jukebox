@@ -3,8 +3,9 @@
     # so a force-stop, OOM-kill, terminal crash or power loss still leaves a
     # resumable snapshot behind — nothing here depends on the exit trap.
     #
-    # Both files live in the persistent cache dir (never in /tmp), so the
-    # startup orphan sweep can't touch them:
+    # Both files live in $JUKEBOX_DATA_DIR (~/.jukebox-app), never in /tmp and
+    # never in ~/.cache, so neither the startup orphan sweep nor a cache
+    # cleaner can take them:
     #   session[-jellyfin].state  — key=value snapshot of playback position
     #   session[-jellyfin].m3u    — the playlist as mpv currently holds it
 

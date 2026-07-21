@@ -81,6 +81,28 @@ source ~/jukebox/jukebox.zsh
 
 Default: `~/Music`
 
+### Data directory
+
+Jukebox keeps its metadata cache and saved sessions in `~/.jukebox-app/`:
+
+| File | What |
+|------|------|
+| `metadata.tsv` / `metadata-jellyfin.tsv` | Persistent, incremental library metadata cache |
+| `session.state` / `session-jellyfin.state` | Last playback position (see [Resuming a session](#resuming-a-session)) |
+| `session.m3u` / `session-jellyfin.m3u` | The queue that belongs to that session |
+
+Override it with `JUKEBOX_DATA_DIR`:
+
+```bash
+export JUKEBOX_DATA_DIR="$HOME/.local/share/jukebox-tui"
+```
+
+These files used to live in `~/.cache/jukebox/`. They are none of them
+disposable — losing the cache means re-probing the whole library, and losing
+the session state means losing your place — and `~/.cache` is regularly wiped
+by cleaners and shared with any other app that calls itself "jukebox". An
+existing `~/.cache/jukebox/` is migrated automatically on the next launch.
+
 ### Jellyfin over LAN or Tailscale
 
 Log in once using the URL that is reachable from the laptop:
@@ -155,7 +177,7 @@ Run `jukebox` and pick a mode:
 ### Resuming a session
 
 Jukebox writes a snapshot of what it is playing to
-`~/.cache/jukebox/session.state` (plus `session.m3u` for the queue) roughly
+`~/.jukebox-app/session.state` (plus `session.m3u` for the queue) roughly
 every two seconds. The write is atomic and never depends on a clean exit, so a
 `SIGKILL`, an OOM-kill, a closed terminal, or a reboot all still leave a
 resumable session behind.
