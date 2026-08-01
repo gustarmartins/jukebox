@@ -24,11 +24,30 @@ graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 - `fzf`: Core interactive menu frontend.
 - `chafa`: Converts MP3/FLAC album art to Kitty pixel-perfect images.
 - `ffmpeg` / `ffprobe`: Used strictly to grab tags & art instantly.
-- `socat` & `jq`: Powers real-time polling to MPV's IPC without Python overhead.
+- `socat` & `jq`: Powers real-time polling to MPV's IPC.
+- `python`: Runs the Jellyfin client and fast MPV IPC helpers.
 
-## Setup
-Source the setup file inside your `~/.zshrc`:
+## Install
+
+### Arch Linux
+
+Once the AUR package is available, install it with an AUR helper:
+
 ```bash
+yay -S jukebox
+# or: paru -S jukebox
+```
+
+This installs the `jukebox` and `nightcore` commands system-wide. Set any
+configuration variables in `~/.zshrc` before running `jukebox`.
+
+### From Git
+
+Install the dependencies with your distribution's package manager, then clone
+the repository and source the setup file inside `~/.zshrc`:
+
+```bash
+git clone https://github.com/gustarmartins/jukebox.git ~/Jukebox
 source ~/Jukebox/jukebox/jukebox.zsh
 ```
 
