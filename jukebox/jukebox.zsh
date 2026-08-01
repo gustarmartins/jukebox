@@ -17,6 +17,23 @@
 # ║  Usage: run `jukebox` in your terminal.                        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
+typeset -g _JUKEBOX_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/jukebox"
+typeset -g _JUKEBOX_SETTINGS_FILE="${_JUKEBOX_CONFIG_DIR}/settings"
+typeset -g _JUKEBOX_MUSIC_DIR_EXPLICIT=0
+typeset -g _JUKEBOX_MUSIC_DIR_CONFIGURED=0
+
+if (( ${+parameters[JUKEBOX_MUSIC_DIR]} )) && [[ -n "$JUKEBOX_MUSIC_DIR" ]]; then
+    _JUKEBOX_MUSIC_DIR_EXPLICIT=1
+elif [[ -r "$_JUKEBOX_SETTINGS_FILE" ]]; then
+    while IFS=$'\t' read -r _jukebox_setting _jukebox_value; do
+        if [[ "$_jukebox_setting" == "music_dir" && -n "$_jukebox_value" ]]; then
+            JUKEBOX_MUSIC_DIR="$_jukebox_value"
+            _JUKEBOX_MUSIC_DIR_CONFIGURED=1
+            break
+        fi
+    done < "$_JUKEBOX_SETTINGS_FILE"
+fi
+
 : ${JUKEBOX_MUSIC_DIR:="$HOME/Music"}
 : ${JUKEBOX_SOURCE:="local"}
 # Own directory rather than ~/.cache/jukebox: the metadata cache and the saved
@@ -28,6 +45,65 @@ _JUKEBOX_JELLYFIN_CLIENT="${_JUKEBOX_SCRIPT_DIR}/jellyfin_client.py"
 
 # --- fzf preview command (calls external Python script) ---
 _jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
+
+_jukebox_save_music_dir() {
+    local music_dir="$1" config_tmp
+
+    mkdir -p "$_JUKEBOX_CONFIG_DIR" || return 1
+    chmod 700 "$_JUKEBOX_CONFIG_DIR" 2>/dev/null
+    config_tmp=$(mktemp "${_JUKEBOX_CONFIG_DIR}/settings.XXXXXX") || return 1
+    chmod 600 "$config_tmp" 2>/dev/null
+    print -r -- $'music_dir\t'"$music_dir" > "$config_tmp"
+    command mv -f "$config_tmp" "$_JUKEBOX_SETTINGS_FILE"
+    chmod 600 "$_JUKEBOX_SETTINGS_FILE" 2>/dev/null
+}
+
+_jukebox_configure_music_dir() {
+    local force="${1:-0}" default_dir="$JUKEBOX_MUSIC_DIR" answer selected_dir
+
+    if (( ! force )) && [[ -d "$JUKEBOX_MUSIC_DIR" ]] && \
+        (( _JUKEBOX_MUSIC_DIR_EXPLICIT || _JUKEBOX_MUSIC_DIR_CONFIGURED )); then
+        return 0
+    fi
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        echo "❌ Music directory is not configured. Run 'jukebox setup' in an interactive terminal or set JUKEBOX_MUSIC_DIR."
+        return 1
+    fi
+
+    echo "🎵 First-time Jukebox setup"
+    echo "Choose the folder that contains your FLAC music library."
+    while true; do
+        print -n "Music directory [$default_dir]: "
+        IFS= read -r answer || return 1
+        selected_dir="${answer:-$default_dir}"
+        if [[ "$selected_dir" == "~" ]]; then
+            selected_dir="$HOME"
+        elif [[ "$selected_dir" == "~/"* ]]; then
+            selected_dir="$HOME/${selected_dir#\~/}"
+        fi
+        selected_dir="${selected_dir:A}"
+
+        if [[ ! -d "$selected_dir" ]]; then
+            echo "❌ '$selected_dir' is not an existing directory. Try again."
+            continue
+        fi
+        if [[ ! -r "$selected_dir" ]]; then
+            echo "❌ '$selected_dir' cannot be read. Choose another directory."
+            continue
+        fi
+
+        JUKEBOX_MUSIC_DIR="$selected_dir"
+        _JUKEBOX_MUSIC_DIR_EXPLICIT=0
+        _JUKEBOX_MUSIC_DIR_CONFIGURED=1
+        if ! _jukebox_save_music_dir "$JUKEBOX_MUSIC_DIR"; then
+            echo "❌ Could not save Jukebox settings in $_JUKEBOX_CONFIG_DIR"
+            return 1
+        fi
+        echo "✓ Music library set to $JUKEBOX_MUSIC_DIR"
+        return 0
+    done
+}
 
 # --- main function ---
 jukebox() {
@@ -42,6 +118,10 @@ jukebox() {
     # Connection management intentionally runs before any player temp files or
     # terminal state are created.
     case "$1" in
+        setup|configure)
+            _jukebox_configure_music_dir 1
+            return $?
+            ;;
         jellyfin-login)
             shift
             command python3 "$_JUKEBOX_JELLYFIN_CLIENT" login "$@"
@@ -59,6 +139,10 @@ jukebox() {
 
     if [[ "$_jukebox_source" != "local" && "$_jukebox_source" != "jellyfin" ]]; then
         echo "❌ JUKEBOX_SOURCE must be 'local' or 'jellyfin'"
+        return 1
+    fi
+
+    if [[ "$_jukebox_source" == "local" ]] && ! _jukebox_configure_music_dir; then
         return 1
     fi
 
@@ -1264,7 +1348,7 @@ nightcore() {
     local _nc_output=""
     local _nc_preview=0
     local _nc_suffix="Nightcore Mix"
-    local _nc_musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
+    local _nc_musicdir=""
     local _nc_script_dir="${_JUKEBOX_SCRIPT_DIR:-${0:A:h}}"
 
     # ── parse arguments ──────────────────────────────────────────
@@ -1333,6 +1417,8 @@ HELPEOF
 
     # ── file picker (if no input file given) ─────────────────────
     if [[ -z "$_nc_input" ]]; then
+        _jukebox_configure_music_dir || return 1
+        _nc_musicdir="$JUKEBOX_MUSIC_DIR"
         command -v fzf &>/dev/null || { echo "❌ fzf is required for the interactive picker"; return 1; }
 
         local _nc_cachefile="${JUKEBOX_DATA_DIR:-$HOME/.jukebox-app}/metadata.tsv"

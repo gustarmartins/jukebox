@@ -38,8 +38,9 @@ yay -S jukebox
 # or: paru -S jukebox
 ```
 
-This installs the `jukebox` and `nightcore` commands system-wide. Set any
-configuration variables in `~/.zshrc` before running `jukebox`.
+This installs the `jukebox` and `nightcore` commands system-wide. On the first
+local launch, Jukebox asks where your music lives and saves that choice in its
+own private configuration directory. It never edits your shell profile.
 
 ### From Git
 
@@ -51,7 +52,15 @@ git clone https://github.com/gustarmartins/jukebox.git ~/Jukebox
 source ~/Jukebox/jukebox/jukebox.zsh
 ```
 
-To configure your music folder, define the variable before sourcing:
+Jukebox asks for the music folder on its first local launch. To change it
+later, run:
+
+```bash
+jukebox setup
+```
+
+For non-interactive use or a temporary override, define the variable before
+sourcing:
 ```bash
 export JUKEBOX_MUSIC_DIR="$HOME/Music"
 ```

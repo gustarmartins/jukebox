@@ -58,7 +58,7 @@ sudo dnf install zsh mpv fzf ffmpeg chafa socat jq bc
    source ~/jukebox/jukebox.zsh
    ```
 
-3. **Put FLAC files** in `~/Music` (or configure a custom path — see below).
+3. **Run `jukebox` once** and choose the folder containing your FLAC files.
 
 4. **Reload your shell:**
    ```bash
@@ -72,7 +72,16 @@ sudo dnf install zsh mpv fzf ffmpeg chafa socat jq bc
 
 ## Configuration
 
-Set `JUKEBOX_MUSIC_DIR` before the source line in your `~/.zshrc` to use a custom music folder:
+On the first local launch, Jukebox asks for the music folder and saves the
+choice in its own configuration file. It does not edit `~/.zshrc`. Change the
+saved folder later with:
+
+```zsh
+jukebox setup
+```
+
+Set `JUKEBOX_MUSIC_DIR` before the source line in your `~/.zshrc` only when
+you want a non-interactive or temporary override:
 
 ```bash
 export JUKEBOX_MUSIC_DIR="$HOME/my-flacs"
