@@ -1,6 +1,6 @@
 # 🎵 Jukebox
 
-A terminal-based music player for zsh. Browse local FLAC files or a Jellyfin
+A terminal-based music player for zsh. Browse local FLAC/MP3 files or a Jellyfin
 music library, build custom queues, see album art and synchronized lyrics in
 the terminal, and control playback without leaving the command line.
 
@@ -228,8 +228,8 @@ offered. Option `x` deletes the saved session.
 ## Notes
 
 - **Linux only** — uses GNU `find -printf` for date sorting. Not compatible with macOS.
-- **Local mode is FLAC-only** — Jellyfin mode supports the audio formats exposed by the server.
-- Album art is extracted from embedded metadata (most FLAC files have it).
+- **Local mode supports FLAC and MP3** — Jellyfin mode supports the audio formats exposed by the server.
+- Album art is extracted from embedded metadata (most files have it).
 
 ### Known Limits
 Because Jukebox runs natively in Zsh without a heavy backend, it is subject to certain shell and OS-level limits when scanning massive libraries:

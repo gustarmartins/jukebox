@@ -108,7 +108,7 @@ _jukebox_configure_music_dir() {
 # --- main function ---
 jukebox() {
     # Suppress zsh job control messages ("+ done" etc) for background tasks
-    setopt localoptions nomonitor
+    setopt localoptions localtraps nomonitor
 
     local _jukebox_debug=0
     local _jukebox_debuglog="/tmp/jukebox-debug.log"
@@ -182,6 +182,7 @@ jukebox() {
     command rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
     command rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
     command rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
+    command rm -f /tmp/jukebox-watch-*.fifo(N) 2>/dev/null
     command rm -f /tmp/jukebox-mpv-auth-*.conf(N) 2>/dev/null
     command rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
     command rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
@@ -234,7 +235,8 @@ jukebox() {
     fi
     # Half-written snapshots from a session that died mid-save (the exact
     # scenario this feature guards against) never get an atomic mv.
-    command rm -f "$_jukebox_datadir"/session*.tmp.*(N) 2>/dev/null
+    command rm -f "$_jukebox_datadir"/session*.tmp.*(N) \
+        "$cachefile".tmp.*(N) 2>/dev/null
 
     # Saved-session state, populated by _jukebox_load_state (src/session.zsh).
     local _jukebox_resuming=0
@@ -257,6 +259,38 @@ jukebox() {
 
     local _cache_pid=""
     local _watcher_pid=""
+    local _watcher_reader_pid=""
+    local _watcher_fifo="/tmp/jukebox-watch-$$.fifo"
+
+    # Cache sync and the recursive watcher start before the launch menu. Keep
+    # their cleanup available to every early return, and arm it for signals.
+    # The full player cleanup trap replaces this one later.
+    _jukebox_stop_startup_jobs() {
+        if [[ -n "$_cache_pid" ]]; then
+            if kill -0 "$_cache_pid" 2>/dev/null; then
+                kill "$_cache_pid" 2>/dev/null
+            fi
+            wait "$_cache_pid" 2>/dev/null
+            _cache_pid=""
+            command rm -f "$cachefile".tmp.*(N) 2>/dev/null
+        fi
+        if [[ -n "$_watcher_pid" ]]; then
+            if kill -0 "$_watcher_pid" 2>/dev/null; then
+                kill "$_watcher_pid" 2>/dev/null
+            fi
+            wait "$_watcher_pid" 2>/dev/null
+            _watcher_pid=""
+        fi
+        if [[ -n "$_watcher_reader_pid" ]]; then
+            if kill -0 "$_watcher_reader_pid" 2>/dev/null; then
+                kill "$_watcher_reader_pid" 2>/dev/null
+            fi
+            wait "$_watcher_reader_pid" 2>/dev/null
+            _watcher_reader_pid=""
+        fi
+        command rm -f "$_watcher_fifo" 2>/dev/null
+    }
+    trap _jukebox_stop_startup_jobs INT TERM HUP QUIT PIPE
 
     if [[ "$_jukebox_source" == "jellyfin" ]]; then
         echo "⏳ Syncing Jellyfin music library..."
@@ -269,14 +303,16 @@ jukebox() {
     # remove entries for DELETED files. Makes repeated launches near-instant.
     "$_JUKEBOX_PYTHON" -c "
 import subprocess, json, os, sys
+from concurrent.futures import ThreadPoolExecutor
 musicdir = sys.argv[1]
 cache_path = sys.argv[2]
 
-# Discover all .flac files on disk
+# Discover all supported local audio files on disk
 disk_files = set()
 for root, dirs, files in os.walk(musicdir):
     for f in sorted(files):
-        if f.lower().endswith('.flac'):
+        f_lower = f.lower()
+        if f_lower.endswith('.flac') or f_lower.endswith('.mp3'):
             disk_files.add(os.path.join(root, f))
 
 # Load existing cache entries.
@@ -298,8 +334,9 @@ deleted = set(cached.keys()) - disk_files
 for d in deleted:
     del cached[d]
 
-# Probe only new files
-for fp in sorted(new_files):
+# Probe new files concurrently. A small pool keeps HDD pressure reasonable but
+# avoids making a large first MP3 import look permanently stuck.
+def probe(fp):
     try:
         r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
                            capture_output=True, text=True, timeout=10)
@@ -314,20 +351,41 @@ for fp in sorted(new_files):
                     except ValueError: pass
             return default
         f = os.path.basename(fp)
-        title = get('title') or f.replace('.flac','')
+        title = get('title') or os.path.splitext(f)[0]
         artist = get('artist') or 'Unknown'
         album = get('album') or 'Unknown'
         date = get('date') or '0'
         dur = d.get('format',{}).get('duration','0')
         track = numtag('0','track','tracknumber')   # 0 = unknown, sorts first
         disc = numtag('1','disc','discnumber')       # 1 = assume single-disc
-        cached[fp] = f'{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}'
-    except: pass
+        value = f'{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}'
+        return fp, value
+    except Exception:
+        return fp, None
 
-# Write the full cache back
-with open(cache_path, 'w') as out:
-    for fp in sorted(cached.keys()):
-        out.write(f'{fp}\t{cached[fp]}\n')
+ordered_new = sorted(new_files)
+if ordered_new:
+    print(f'Library cache: probing {len(ordered_new)} new tracks...', file=sys.stderr, flush=True)
+    with ThreadPoolExecutor(max_workers=min(4, len(ordered_new))) as executor:
+        for index, (fp, value) in enumerate(executor.map(probe, ordered_new), 1):
+            if value is not None:
+                cached[fp] = value
+            if index % 25 == 0 or index == len(ordered_new):
+                print(f'Library cache: {index}/{len(ordered_new)} tracks', file=sys.stderr, flush=True)
+
+# Replace the cache atomically. Startup cleanup may stop this background sync;
+# an interrupted refresh must never truncate the last known-good library.
+cache_tmp = f'{cache_path}.tmp.{os.getpid()}'
+try:
+    with open(cache_tmp, 'w') as out:
+        for fp in sorted(cached.keys()):
+            out.write(f'{fp}\t{cached[fp]}\n')
+    os.replace(cache_tmp, cache_path)
+finally:
+    try:
+        os.unlink(cache_tmp)
+    except FileNotFoundError:
+        pass
 
 if new_files or deleted:
     print(f'Cache: +{len(new_files)} new, -{len(deleted)} removed', file=sys.stderr)
@@ -335,11 +393,13 @@ if new_files or deleted:
     _cache_pid=$!
 
     # --- live directory watcher (detects new .flac files during playback) ---
-    if command -v inotifywait >/dev/null 2>&1; then
+    if command -v inotifywait >/dev/null 2>&1 && command mkfifo "$_watcher_fifo"; then
+        inotifywait -m -r -e close_write,moved_to --format '%w%f' \
+            "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" > "$_watcher_fifo" 2>/dev/null &
+        _watcher_pid=$!
         (
-            inotifywait -m -r -e close_write,moved_to --format '%w%f' \
-                "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" 2>/dev/null | while read -r newfile; do
-                [[ "$newfile" != *.flac && "$newfile" != *.FLAC ]] && continue
+            while read -r newfile; do
+                [[ "${newfile:l}" != *.flac && "${newfile:l}" != *.mp3 ]] && continue
                 # Check if already in cache
                 grep -qF "$newfile" "$cachefile" 2>/dev/null && continue
                 # Probe and append
@@ -361,7 +421,7 @@ try:
                 except ValueError: pass
         return default
     f = os.path.basename(fp)
-    title = get('title') or f.replace('.flac','')
+    title = get('title') or os.path.splitext(f)[0]
     artist = get('artist') or 'Unknown'
     album = get('album') or 'Unknown'
     date = get('date') or '0'
@@ -373,15 +433,23 @@ try:
 except: pass
 " "$newfile" "$cachefile"
             done
-        ) &
-        _watcher_pid=$!
+        ) < "$_watcher_fifo" &
+        _watcher_reader_pid=$!
     fi
     fi
 
     _jukebox_setup_fzf_sort() {
-        if [[ -n "$_cache_pid" ]] && kill -0 "$_cache_pid" 2>/dev/null; then
-            echo "⏳ Building music library metadata cache..."
-            wait "$_cache_pid" 2>/dev/null
+        if [[ -n "$_cache_pid" ]]; then
+            if kill -0 "$_cache_pid" 2>/dev/null; then
+                echo "⏳ Building music library metadata cache..."
+            fi
+            local _cache_status=0
+            wait "$_cache_pid" || _cache_status=$?
+            _cache_pid=""
+            command rm -f "$cachefile".tmp.*(N) 2>/dev/null
+            if (( _cache_status != 0 )); then
+                echo "⚠️  Library metadata refresh failed; using the existing cache."
+            fi
         fi
 
         _fzf_sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
@@ -458,13 +526,18 @@ SORTEOF
                 *) cut -f1 "$cachefile" ;;
             esac
         else
+            setopt localoptions extendedglob nocaseglob
+            local _raw_files=()
             case "$order" in
-                name_asc)  printf '%s\n' "$musicdir"/**/*.flac(N.on) ;;
-                name_desc) printf '%s\n' "$musicdir"/**/*.flac(N.On) ;;
-                date_asc)  printf '%s\n' "$musicdir"/**/*.flac(N.Om) ;;
-                date_desc) printf '%s\n' "$musicdir"/**/*.flac(N.om) ;;
-                *) printf '%s\n' "$musicdir"/**/*.flac(N.) ;;
+                name_asc)  _raw_files=("$musicdir"/**/*.(flac|mp3)(N.on)) ;;
+                name_desc) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.On)) ;;
+                date_asc)  _raw_files=("$musicdir"/**/*.(flac|mp3)(N.Om)) ;;
+                date_desc) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.om)) ;;
+                *) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.)) ;;
             esac
+            for f in "${_raw_files[@]}"; do
+                printf '%s\n' "$f"
+            done
         fi
     }
 
@@ -499,12 +572,14 @@ SORTEOF
         0|r|R)
             if (( ! _resume_available )); then
                 echo "Nothing to resume"
+                _jukebox_stop_startup_jobs
                 return 1
             fi
             files=("${(@f)$(<"$_jukebox_state_playlist")}")
             files=("${(@)files:#}")   # drop blank lines
             if [[ ${#files[@]} -eq 0 ]]; then
                 echo "Saved session playlist is empty"
+                _jukebox_stop_startup_jobs
                 return 1
             fi
             start_idx=$_resume_pos
@@ -516,6 +591,7 @@ SORTEOF
                 command rm -f "$_jukebox_state_file" "$_jukebox_state_playlist" 2>/dev/null
                 echo "🗑  Saved session discarded"
             fi
+            _jukebox_stop_startup_jobs
             return
             ;;
         1) files=("${(@f)$(_jukebox_source_files original)}") ;;
@@ -527,6 +603,7 @@ SORTEOF
             local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
             if [[ ${#all_files[@]} -eq 0 ]]; then
                 echo "No music found in the $_jukebox_source library"
+                _jukebox_stop_startup_jobs
                 return 1
             fi
             
@@ -583,12 +660,16 @@ _jukebox_rate_track() {
                     
             if [[ -z "$output" ]]; then
                 command rm -rf "$_fzf_sort_dir"
+                _jukebox_stop_startup_jobs
                 return
             fi
             
             local key_pressed=$(echo "$output" | head -n 1)
             local selected=$(echo "$output" | sed '1d')
-            [[ -z "$selected" ]] && return
+            if [[ -z "$selected" ]]; then
+                _jukebox_stop_startup_jobs
+                return
+            fi
             
             # Reconstruct the true visual order if the user changed the sort
             local current_sort
@@ -649,6 +730,7 @@ _jukebox_rate_track() {
             local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
             if [[ ${#all_files[@]} -eq 0 ]]; then
                 echo "No music found in the $_jukebox_source library"
+                _jukebox_stop_startup_jobs
                 return 1
             fi
             
@@ -677,7 +759,10 @@ _jukebox_rate_track() {
                     "${_fzf_binds[@]}")
                     
             command rm -rf "$_fzf_sort_dir"
-            [[ -z "$selected" ]] && return
+            if [[ -z "$selected" ]]; then
+                _jukebox_stop_startup_jobs
+                return
+            fi
             files=("${(@f)${$(echo "$selected" | cut -f1)}}")
             echo ""
             echo "📋 Queue (${#files[@]} songs):"
@@ -690,12 +775,20 @@ _jukebox_rate_track() {
             start_idx=0
             ;;
 
-        q|Q) return ;;
-        *) echo "Invalid choice"; return 1 ;;
+        q|Q)
+            _jukebox_stop_startup_jobs
+            return
+            ;;
+        *)
+            echo "Invalid choice"
+            _jukebox_stop_startup_jobs
+            return 1
+            ;;
     esac
 
     if [[ ${#files[@]} -eq 0 ]]; then
         echo "No music found in the $_jukebox_source library"
+        _jukebox_stop_startup_jobs
         return 1
     fi
 
@@ -725,11 +818,8 @@ _jukebox_rate_track() {
             kill -9 "$_jukebox_mpv_pid" 2>/dev/null
             wait "$_jukebox_mpv_pid" 2>/dev/null
         fi
-        # Kill the live directory watcher
-        if [[ -n "$_watcher_pid" ]] && kill -0 "$_watcher_pid" 2>/dev/null; then
-            kill "$_watcher_pid" 2>/dev/null
-            wait "$_watcher_pid" 2>/dev/null
-        fi
+        # Stop any library background jobs still active.
+        _jukebox_stop_startup_jobs
         # Remove session-specific temp files (persistent cache is kept!)
         command rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
         [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
@@ -748,10 +838,10 @@ _jukebox_rate_track() {
                    _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
                    _jukebox_log _jukebox_setup_fzf_sort \
+                   _jukebox_stop_startup_jobs \
                    _jukebox_save_state _jukebox_load_state _jukebox_snapshot_playlist \
                    _jukebox_resume_label _jukebox_apply_resume 2>/dev/null
     }
-    setopt localoptions localtraps
     trap _jukebox_cleanup INT TERM HUP QUIT PIPE EXIT
 
     # start mpv in background with IPC socket, fully headless
