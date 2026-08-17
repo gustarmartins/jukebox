@@ -210,11 +210,31 @@ offered. Option `x` deletes the saved session.
 | `↑` / `↓` | Seek ±30 seconds |
 | `,` / `.` | Previous / next track |
 | `<` / `>` | Previous / next track (same keys with Shift) |
-| `L` | Open queue picker (fzf) — jump to any track |
+| `S` | **Shuffle upcoming queue** on the fly without stopping playback |
+| `N` / `B` | **Redo queue** / select a new playlist mode without closing the app |
+| `A` | Add songs to play next (inserted right after current track) |
+| `L` | Open queue manager (interactive queue editor & reordering) |
 | `Y` | Toggle lyrics view |
-| `[` / `]` | Decrease / increase playback speed |
-| `Backspace` | Reset speed to 1.0× |
-| `q` | Quit |
+| `i` | Show detailed audio metadata & stream info overlay |
+| `[` / `]` | Decrease / increase playback speed / pitch |
+| `P` | Switch realtime effect mode (`tempo`, `nightcore`, `pitch`) |
+| `Backspace` / `R` | Reset playback speed and pitch modifiers to 1.0× |
+| `q` | Quit (prompts confirmation) |
+
+### Interactive Queue Manager (`L`)
+
+Press `L` during playback to open the live queue manager:
+
+| Key | Action |
+|-----|--------|
+| `ENTER` | Jump to selected track |
+| `DEL` | Remove selected track from playlist & queue |
+| `Alt+↑` / `Alt+↓` | Move selected track up or down |
+| `Alt+S` | **Shuffle upcoming tracks** in-place |
+| `Alt+C` | **Clear upcoming tracks** |
+| `Alt+A` | Add more tracks to the queue |
+| `Alt+R` | Redo / replace queue with new selection |
+| `ESC` | Return to player |
 
 ### Queue builder (option 8)
 

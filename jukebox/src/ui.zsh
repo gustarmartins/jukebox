@@ -273,7 +273,7 @@
         if [[ "$_layout_mode" == "normal" ]]; then
             # Full header (5 rows): Controls1, Controls2, Title+Artist, Album, Track
             local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  [/]=adj  P=mode:${rt_mode}"
-            local controls2="A=add next  L=queue  Y=lyrics  j/k=nav next  i=info  ENTER=play nav  q=quit"
+            local controls2="A=add next  L=queue  S=shuffle  N=new queue  Y=lyrics  j/k=nav  i=info  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
             printf '\e[2;1H'
@@ -288,7 +288,7 @@
 
         elif [[ "$_layout_mode" == "compact" ]]; then
             # Compact header (3 rows): Controls, Title+Artist+Track, Album
-            local controls_compact="A=add  L=que  Y=lyrics  j/k=nav  i=info  P=mode:${rt_mode}  q=quit"
+            local controls_compact="A=add  L=que  S=shuf  N=new  Y=lyr  j/k=nav  i=info  P=mode:${rt_mode}  q=quit"
             printf '\e[1;1H\e[2m'
             _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
             printf '\e[0m'

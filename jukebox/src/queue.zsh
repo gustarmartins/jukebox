@@ -92,6 +92,298 @@ except: pass
         done
     }
 
+    _jukebox_shuffle_upcoming() {
+        export _JUKEBOX_SOCK="$mpvsock"
+        "$_JUKEBOX_PYTHON" -c '
+import socket, json, sys, os, random
+sock_path = os.environ.get("_JUKEBOX_SOCK") or sys.argv[1]
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(sock_path)
+    s.sendall(b"{\"command\":[\"get_property\",\"playlist\"], \"request_id\": 888}\n")
+    buf = b""
+    pl_data = None
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try: obj = json.loads(line)
+            except: continue
+            if obj.get("request_id") == 888:
+                pl_data = obj.get("data", [])
+                break
+        if pl_data is not None:
+            break
+
+    if not pl_data or len(pl_data) <= 1:
+        s.close()
+        sys.exit(0)
+
+    cur_pos = 0
+    for i, e in enumerate(pl_data):
+        if e.get("current"):
+            cur_pos = i
+            break
+
+    n = len(pl_data)
+    upcoming_count = n - (cur_pos + 1)
+    if upcoming_count <= 1:
+        s.close()
+        sys.exit(0)
+
+    current_order = [e.get("id") for e in pl_data]
+    upcoming_ids = list(current_order[cur_pos + 1:])
+    random.shuffle(upcoming_ids)
+    target_order = current_order[:cur_pos + 1] + upcoming_ids
+
+    state = list(current_order)
+    moves = []
+    for target_pos in range(cur_pos + 1, n):
+        target_id = target_order[target_pos]
+        curr_pos_of_id = state.index(target_id)
+        if curr_pos_of_id != target_pos:
+            moves.append({"command": ["playlist-move", curr_pos_of_id, target_pos]})
+            item = state.pop(curr_pos_of_id)
+            state.insert(target_pos, item)
+
+    if moves:
+        payload = "".join(json.dumps(m) + "\n" for m in moves).encode()
+        s.sendall(payload)
+
+    s.close()
+except Exception:
+    pass
+' "$mpvsock" 2>/dev/null
+
+        _jukebox_last_next_file=""
+        _jukebox_next_retries=0
+        _jukebox_clear_next_meta
+        _jukebox_snapshot_playlist
+        force_redraw=1
+    }
+
+    _jukebox_redo_queue() {
+        # Temporarily leave altscreen and restore terminal
+        printf '\e[?1049l\e[?25h'
+        [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
+
+        echo ""
+        echo "🎵 Redo Queue / Select Mode:"
+        echo "  1) Browse & pick (plays from selection onward, Alt-s to shuffle rest)"
+        echo "  2) Build queue (TAB to pick multiple, ENTER to play)"
+        echo "  3) Shuffle entire library"
+        echo "  4) Play all (A-Z)"
+        echo "  5) Play all (by Date - newest first)"
+        echo "  6) Play all (Original order)"
+        echo "  q) Cancel (keep current playback)"
+        echo ""
+
+        local rchoice
+        read "rchoice?Choose [1-6, q]: "
+
+        local new_files=()
+        case "$rchoice" in
+            1)
+                local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
+                if [[ ${#all_files[@]} -eq 0 ]]; then
+                    echo "No music found in the $_jukebox_source library"
+                    sleep 1
+                    printf '\e[?1049h\e[2J\e[?25l'
+                    stty -echo -icanon min 0 time 0 2>/dev/null
+                    force_redraw=1
+                    return
+                fi
+
+                _jukebox_setup_fzf_sort
+
+                local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
+                if [[ -s "$cachefile" ]]; then
+                    fzf_header="$fzf_header
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+                fi
+
+                local input_list
+                input_list=$(_jukebox_get_input_list "${all_files[@]}")
+
+                local visual_paths
+                visual_paths=$(echo "$input_list" | cut -f1)
+                all_files=("${(@f)visual_paths}")
+
+                echo "default" > "/tmp/jukebox-sort-state-$$"
+                local output
+                output=$(echo "$input_list" | \
+                    fzf -i --multi \
+                        --delimiter=$'\t' --with-nth=2 \
+                        --prompt="Pick start song(s): " \
+                        --header="$fzf_header" \
+                        --marker="✔ " \
+                        --preview "$_jukebox_fzf_preview" \
+                        --preview-window=right:50% \
+                        --expect=enter,alt-s \
+                        "${_fzf_binds[@]}")
+
+                if [[ -z "$output" ]]; then
+                    command rm -rf "$_fzf_sort_dir"
+                    printf '\e[?1049h\e[2J\e[?25l'
+                    stty -echo -icanon min 0 time 0 2>/dev/null
+                    force_redraw=1
+                    return
+                fi
+
+                local key_pressed=$(echo "$output" | head -n 1)
+                local selected=$(echo "$output" | sed '1d')
+                if [[ -z "$selected" ]]; then
+                    command rm -rf "$_fzf_sort_dir"
+                    printf '\e[?1049h\e[2J\e[?25l'
+                    stty -echo -icanon min 0 time 0 2>/dev/null
+                    force_redraw=1
+                    return
+                fi
+
+                local current_sort
+                current_sort=$(cat "/tmp/jukebox-sort-state-$$" 2>/dev/null)
+                if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
+                    local sorted_paths
+                    sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
+                    all_files=("${(@f)sorted_paths}")
+                fi
+                command rm -rf "$_fzf_sort_dir"
+
+                local picked_arr=("${(@f)${$(echo "$selected" | cut -f1)}}")
+                local last_picked="${picked_arr[-1]}"
+                local last_idx=-1
+                for i in {1..${#all_files[@]}}; do
+                    [[ "${all_files[$i]}" == "$last_picked" ]] && { last_idx=$i; break; }
+                done
+
+                new_files=("${picked_arr[@]}")
+                if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
+                    local -A seen
+                    for x in "${picked_arr[@]}"; do seen[$x]=1; done
+                    local remaining_files=()
+                    for ((i=last_idx+1; i<=${#all_files[@]}; i++)); do
+                        local f="${all_files[$i]}"
+                        if [[ -z "${seen[$f]}" ]]; then
+                            remaining_files+=("$f")
+                        fi
+                    done
+
+                    if [[ "$key_pressed" == "alt-s" ]]; then
+                        local r_i r_j r_tmp_val
+                        for ((r_i=${#remaining_files[@]}; r_i>1; r_i--)); do
+                            r_j=$((RANDOM % r_i + 1))
+                            r_tmp_val="${remaining_files[$r_i]}"
+                            remaining_files[$r_i]="${remaining_files[$r_j]}"
+                            remaining_files[$r_j]="$r_tmp_val"
+                        done
+                    fi
+                    new_files+=("${remaining_files[@]}")
+                fi
+                ;;
+            2)
+                local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
+                if [[ ${#all_files[@]} -eq 0 ]]; then
+                    echo "No music found in the $_jukebox_source library"
+                    sleep 1
+                    printf '\e[?1049h\e[2J\e[?25l'
+                    stty -echo -icanon min 0 time 0 2>/dev/null
+                    force_redraw=1
+                    return
+                fi
+
+                _jukebox_setup_fzf_sort
+
+                local fzf_header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play"
+                if [[ -s "$cachefile" ]]; then
+                    fzf_header="$fzf_header
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+                fi
+
+                local input_list
+                input_list=$(_jukebox_get_input_list "${all_files[@]}")
+
+                local selected
+                selected=$(echo "$input_list" | \
+                    fzf -i --multi \
+                        --delimiter=$'\t' --with-nth=2 \
+                        --prompt="Queue: " \
+                        --header="$fzf_header" \
+                        --marker="✔ " \
+                        --preview "$_jukebox_fzf_preview" \
+                        --preview-window=right:50% \
+                        --bind 'ctrl-a:select-all,ctrl-d:deselect-all' \
+                        "${_fzf_binds[@]}")
+
+                command rm -rf "$_fzf_sort_dir"
+                if [[ -z "$selected" ]]; then
+                    printf '\e[?1049h\e[2J\e[?25l'
+                    stty -echo -icanon min 0 time 0 2>/dev/null
+                    force_redraw=1
+                    return
+                fi
+                new_files=("${(@f)${$(echo "$selected" | cut -f1)}}")
+                ;;
+            3)
+                local -a _tmp=("${(@f)$(_jukebox_source_files original)}")
+                local i j tmp_val
+                for ((i=${#_tmp[@]}; i>1; i--)); do
+                    j=$((RANDOM % i + 1))
+                    tmp_val="${_tmp[$i]}"
+                    _tmp[$i]="${_tmp[$j]}"
+                    _tmp[$j]="$tmp_val"
+                done
+                new_files=("${_tmp[@]}")
+                ;;
+            4) new_files=("${(@f)$(_jukebox_source_files name_asc)}") ;;
+            5) new_files=("${(@f)$(_jukebox_source_files date_desc)}") ;;
+            6) new_files=("${(@f)$(_jukebox_source_files original)}") ;;
+            *)
+                # Cancel or invalid option: return cleanly to current playback
+                printf '\e[?1049h\e[2J\e[?25l'
+                stty -echo -icanon min 0 time 0 2>/dev/null
+                force_redraw=1
+                return
+                ;;
+        esac
+
+        if [[ ${#new_files[@]} -gt 0 ]]; then
+            printf '%s\n' "${new_files[@]}" > "$playlist"
+            : > "$queuefile"
+
+            local cmd
+            cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["loadlist", sys.argv[1], "replace"]}))' "$playlist" 2>/dev/null)
+            _jukebox_set "$cmd"
+
+            _nav_offset=0
+            _jukebox_last_next_file=""
+            _jukebox_next_retries=0
+            _jukebox_clear_next_meta
+            _lyrics_loaded_path=""
+            _lyrics_starts=(); _lyrics_lines=(); _lyrics_active_index=0
+            last_path=""
+            _render_path=""
+
+            sleep 0.2
+            _render_path=$(_jukebox_batch_get "path")
+            if [[ -n "$_render_path" ]]; then
+                _jukebox_extract_art "$_render_path"
+                _jukebox_cache_art
+            fi
+            _jukebox_snapshot_playlist
+            _jukebox_save_state
+        fi
+
+        # Restore altscreen and raw terminal mode
+        printf '\e[?1049h\e[2J\e[?25l'
+        stty -echo -icanon min 0 time 0 2>/dev/null
+        force_redraw=1
+    }
+
     _jukebox_queue_picker() {
         export _JUKEBOX_SOCK="$mpvsock"
         export _JUKEBOX_QUEUEFILE="$queuefile"
@@ -100,6 +392,8 @@ except: pass
         local fetch_script="$script_dir/fetch.sh"
         local del_script="$script_dir/del.sh"
         local move_script="$script_dir/move.sh"
+        local shuffle_script="$script_dir/shuffle.sh"
+        local clear_script="$script_dir/clear.sh"
 
         # --- fetch script: outputs ID<tab>label lines ---
         # First 2 lines become fzf headers (Now Playing + separator)
@@ -174,6 +468,8 @@ def resolve_name(fp):
     name = fp.rsplit("/", 1)[-1]
     if name.endswith(".flac"):
         name = name[:-5]
+    elif name.endswith(".mp3"):
+        name = name[:-4]
     return name
 
 # Find current position
@@ -311,21 +607,141 @@ except Exception: pass
 ' "$_JUKEBOX_SOCK" "$item_id" "$dir" 2>/dev/null
 MOVEEOF
 
-        chmod +x "$fetch_script" "$del_script" "$move_script"
+        # --- shuffle script: shuffles all upcoming songs in-place ---
+        cat << 'SHUFFLEEOF' > "$shuffle_script"
+#!/usr/bin/env bash
+"$_JUKEBOX_PYTHON" -c '
+import socket, json, sys, random
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(sys.argv[1])
+    s.sendall(b"{\"command\":[\"get_property\",\"playlist\"], \"request_id\": 888}\n")
+    buf = b""
+    pl_data = None
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try: obj = json.loads(line)
+            except: continue
+            if obj.get("request_id") == 888:
+                pl_data = obj.get("data", [])
+                break
+        if pl_data is not None: break
+
+    if not pl_data or len(pl_data) <= 1:
+        s.close()
+        sys.exit(0)
+
+    cur_pos = 0
+    for i, e in enumerate(pl_data):
+        if e.get("current"):
+            cur_pos = i
+            break
+
+    n = len(pl_data)
+    if n - (cur_pos + 1) <= 1:
+        s.close()
+        sys.exit(0)
+
+    current_order = [e.get("id") for e in pl_data]
+    upcoming_ids = list(current_order[cur_pos + 1:])
+    random.shuffle(upcoming_ids)
+    target_order = current_order[:cur_pos + 1] + upcoming_ids
+
+    state = list(current_order)
+    moves = []
+    for target_pos in range(cur_pos + 1, n):
+        target_id = target_order[target_pos]
+        curr_pos_of_id = state.index(target_id)
+        if curr_pos_of_id != target_pos:
+            moves.append({"command": ["playlist-move", curr_pos_of_id, target_pos]})
+            item = state.pop(curr_pos_of_id)
+            state.insert(target_pos, item)
+
+    if moves:
+        payload = "".join(json.dumps(m) + "\n" for m in moves).encode()
+        s.sendall(payload)
+
+    s.close()
+except Exception: pass
+' "$_JUKEBOX_SOCK" 2>/dev/null
+SHUFFLEEOF
+
+        # --- clear script: clears all upcoming tracks ---
+        cat << 'CLEAREOF' > "$clear_script"
+#!/usr/bin/env bash
+"$_JUKEBOX_PYTHON" -c '
+import socket, json, sys
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(3)
+    s.connect(sys.argv[1])
+    s.sendall(b"{\"command\":[\"get_property\",\"playlist\"], \"request_id\": 777}\n")
+    buf = b""
+    pl_data = None
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        buf += c
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try: obj = json.loads(line)
+            except: continue
+            if obj.get("request_id") == 777:
+                pl_data = obj.get("data", [])
+                break
+        if pl_data is not None: break
+
+    if not pl_data:
+        s.close()
+        sys.exit(0)
+
+    cur_pos = 0
+    for i, e in enumerate(pl_data):
+        if e.get("current"):
+            cur_pos = i
+            break
+
+    n = len(pl_data)
+    removes = []
+    for idx in range(n - 1, cur_pos, -1):
+        removes.append({"command": ["playlist-remove", idx]})
+
+    if removes:
+        payload = "".join(json.dumps(r) + "\n" for r in removes).encode()
+        s.sendall(payload)
+
+    s.close()
+except Exception: pass
+' "$_JUKEBOX_SOCK" 2>/dev/null
+
+if [[ -f "$_JUKEBOX_QUEUEFILE" ]]; then
+    : > "$_JUKEBOX_QUEUEFILE"
+fi
+CLEAREOF
+
+        chmod +x "$fetch_script" "$del_script" "$move_script" "$shuffle_script" "$clear_script"
 
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
-        local result
-        result=$("$fetch_script" | fzf -i \
+        local output
+        output=$("$fetch_script" | fzf -i \
             --delimiter=$'\t' --with-nth=2.. \
             --header-lines=2 \
             --prompt='Queue: ' \
-            --header=$'ENTER = Jump  │  DEL = Remove  │  Alt+↑/↓ = Move  │  ESC = Cancel' \
+            --header=$'ENTER = Jump  │  DEL = Remove  │  Alt+↑/↓ = Move  │  Alt+S = Shuffle  │  Alt+C = Clear  │  Alt+A = Add  │  Alt+R = Redo  │  ESC = Back' \
+            --expect=alt-a,alt-r \
             --bind "delete:execute-silent($del_script {1})+reload($fetch_script)" \
             --bind "alt-up:execute-silent($move_script {1} up)+reload($fetch_script)" \
             --bind "alt-down:execute-silent($move_script {1} down)+reload($fetch_script)" \
+            --bind "alt-s:execute-silent($shuffle_script)+reload($fetch_script)" \
+            --bind "alt-c:execute-silent($clear_script)+reload($fetch_script)" \
             --no-sort)
 
         # re-enter altscreen
@@ -334,10 +750,39 @@ MOVEEOF
 
         command rm -rf "$script_dir"
 
+        [[ -z "$output" ]] && {
+            _jukebox_last_next_file=""
+            _jukebox_next_retries=0
+            _jukebox_snapshot_playlist
+            force_redraw=1
+            return
+        }
+
+        local key_pressed=$(echo "$output" | head -n 1)
+        local result=$(echo "$output" | sed '1d')
+
+        if [[ "$key_pressed" == "alt-a" ]]; then
+            _jukebox_add_next
+            _jukebox_last_next_file=""
+            _jukebox_next_retries=0
+            _jukebox_snapshot_playlist
+            force_redraw=1
+            return
+        elif [[ "$key_pressed" == "alt-r" ]]; then
+            _jukebox_redo_queue
+            return
+        fi
+
         # Jump to selected song using stable ID
         if [[ -n "$result" ]]; then
             local selected_id=${result%%$'\t'*}
-            [[ -z "$selected_id" || "$selected_id" == "-" ]] && { force_redraw=1; return; }
+            [[ -z "$selected_id" || "$selected_id" == "-" ]] && {
+                _jukebox_last_next_file=""
+                _jukebox_next_retries=0
+                _jukebox_snapshot_playlist
+                force_redraw=1
+                return
+            }
 
             # Resolve fresh playlist index from stable ID
             local jump_idx
@@ -377,5 +822,9 @@ except Exception: pass
                 fi
             fi
         fi
+
+        _jukebox_last_next_file=""
+        _jukebox_next_retries=0
+        _jukebox_snapshot_playlist
         force_redraw=1
     }

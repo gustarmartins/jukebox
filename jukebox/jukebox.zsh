@@ -253,7 +253,7 @@ jukebox() {
         source "$mod"
     done
 
-    local _jukebox_cleaned=""
+    typeset -g _jukebox_cleaned=""
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
 
@@ -623,30 +623,8 @@ SORTEOF
             # (Because _jukebox_get_input_list sorts by title from cache)
             local visual_paths
             visual_paths=$(echo "$input_list" | cut -f1)
-            all_files=("${(@f)visual_paths}")
-
-# Ratings (column 4): set a 0-5 star rating on a track.
-_jukebox_rate_track() {
-    # Args: rating [path]. Without a path, rate the currently playing track.
-    local rating="$1" path="$2"
-    if [[ -z "$rating" || "$rating" != <-> || "$rating" -gt 5 ]]; then
-        _jukebox_log WARN "invalid rating: ${rating:-<empty>}"
-        print -r -- "jukebox: rating must be an integer 0-5" >&2
-        return 1
-    fi
-    [[ -n "$path" ]] || path=$(_jukebox_current_file)
-    if [[ -z "$path" ]]; then
-        _jukebox_log WARN "no track to rate"
-        print -r -- "jukebox: no track to rate (nothing playing)" >&2
-        return 1
-    fi
-    local id
-    id=$(_jukebox_id_for "$path")
-    _jukebox_meta_set_field "$id" "$path" 4 "$rating"
-    _jukebox_log INFO "rating=$rating for $path"
-    print -r -- "Rated ${rating}/5: ${path:t}"
-}
             echo "default" > "/tmp/jukebox-sort-state-$$"
+            local output
             output=$(echo "$input_list" | \
                 fzf -i --multi \
                     --delimiter=$'\t' --with-nth=2 \
@@ -835,7 +813,7 @@ _jukebox_rate_track() {
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
+                   _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
                    _jukebox_log _jukebox_setup_fzf_sort \
                    _jukebox_stop_startup_jobs \
@@ -1101,6 +1079,12 @@ _jukebox_rate_track() {
                     _jukebox_next_retries=0
                     _jukebox_snapshot_playlist   # queue changed — persist it
                     force_redraw=1
+                    ;;
+                's'|'S')
+                    _jukebox_shuffle_upcoming
+                    ;;
+                'n'|'N'|'b'|'B')
+                    _jukebox_redo_queue
                     ;;
                 'L'|'l')
                     _jukebox_queue_picker
