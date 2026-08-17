@@ -150,8 +150,24 @@ try:
             state.insert(target_pos, item)
 
     if moves:
+        for m_idx, m in enumerate(moves):
+            m["request_id"] = 2000 + m_idx
+        last_req_id = moves[-1]["request_id"]
         payload = "".join(json.dumps(m) + "\n" for m in moves).encode()
         s.sendall(payload)
+        while True:
+            c = s.recv(65536)
+            if not c: break
+            buf += c
+            done = False
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try: obj = json.loads(line)
+                except: continue
+                if obj.get("request_id") == last_req_id:
+                    done = True
+                    break
+            if done: break
 
     s.close()
 except Exception:
@@ -663,8 +679,24 @@ try:
             state.insert(target_pos, item)
 
     if moves:
+        for m_idx, m in enumerate(moves):
+            m["request_id"] = 2000 + m_idx
+        last_req_id = moves[-1]["request_id"]
         payload = "".join(json.dumps(m) + "\n" for m in moves).encode()
         s.sendall(payload)
+        while True:
+            c = s.recv(65536)
+            if not c: break
+            buf += c
+            done = False
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try: obj = json.loads(line)
+                except: continue
+                if obj.get("request_id") == last_req_id:
+                    done = True
+                    break
+            if done: break
 
     s.close()
 except Exception: pass
@@ -708,12 +740,28 @@ try:
 
     n = len(pl_data)
     removes = []
+    last_req_id = None
     for idx in range(n - 1, cur_pos, -1):
-        removes.append({"command": ["playlist-remove", idx]})
+        last_req_id = 1000 + idx
+        removes.append({"command": ["playlist-remove", idx], "request_id": last_req_id})
 
     if removes:
         payload = "".join(json.dumps(r) + "\n" for r in removes).encode()
         s.sendall(payload)
+        if last_req_id:
+            while True:
+                c = s.recv(65536)
+                if not c: break
+                buf += c
+                done = False
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try: obj = json.loads(line)
+                    except: continue
+                    if obj.get("request_id") == last_req_id:
+                        done = True
+                        break
+                if done: break
 
     s.close()
 except Exception: pass
