@@ -1,3 +1,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Makepkg build artifacts
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.pkg.tar.*
+packaging/arch/*.tar.gz
