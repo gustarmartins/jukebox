@@ -55,6 +55,18 @@ class FirstRunSetupTest(unittest.TestCase):
             )
             self.assertEqual(loaded.returncode, 0, loaded.stderr)
 
+    def test_changing_music_directory_preserves_other_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            library = home / "Music"
+            library.mkdir()
+            settings = home / ".config" / "jukebox" / "settings"
+            settings.parent.mkdir(parents=True)
+            settings.write_text("osu_dir\t/my/osu songs\nosu_filters\trock|pop\nunknown\tkeep me\n")
+            result = self.run_zsh(home, f'_jukebox_save_music_dir "{library}"')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(settings.read_text(), "osu_dir\t/my/osu songs\nosu_filters\trock|pop\nunknown\tkeep me\n" + f"music_dir\t{library}\n")
+
 
 if __name__ == "__main__":
     unittest.main()

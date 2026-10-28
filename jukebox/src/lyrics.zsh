@@ -18,9 +18,11 @@
 
     _jukebox_update_lyric_index() {
         local pos=${_render_time_pos:-0}
-        local pos_whole=${pos%.*}
-        [[ -z "$pos_whole" ]] && pos_whole=0
-        local pos_ms=$(( pos_whole * 1000 ))
+        local pos_whole=${pos%.*} fraction="${pos#*.}"
+        [[ "$pos_whole" == <-> ]] || pos_whole=0
+        [[ "$pos" == *.* && "$fraction" == <-> ]] || fraction=0
+        fraction="${fraction}000"
+        local pos_ms=$(( pos_whole * 1000 + 10#${fraction[1,3]} ))
         local found=0 i start
         if (( ${#_lyrics_lines[@]} == 0 )); then
             _lyrics_active_index=0
@@ -34,7 +36,6 @@
             start=${_lyrics_starts[$i]:--1}
             (( start <= pos_ms )) && found=$i || break
         done
-        (( found == 0 )) && found=1
         _lyrics_active_index=$found
     }
 

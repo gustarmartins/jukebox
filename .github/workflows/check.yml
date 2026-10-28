@@ -1,0 +1,30 @@
+name: Check Jukebox
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh mpv ffmpeg fzf chafa inotify-tools
+          python -m pip install pytest
+      - name: Check shell syntax
+        run: |
+          for script in jukebox/jukebox.zsh jukebox/src/*.zsh; do
+            zsh -n "$script"
+          done
+          bash -n packaging/arch/PKGBUILD
+      - name: Test with isolated, silent mpv instances
+        run: python -m pytest -q

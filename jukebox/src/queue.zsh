@@ -20,7 +20,7 @@
 
         local selected
         selected=$(echo "$input_list" | \
-            fzf -i --multi \
+            _jukebox_fzf -i --multi \
                 --delimiter=$'\t' --with-nth=2 \
                 --prompt="Add Next: " \
                 --header="$fzf_header" \
@@ -229,10 +229,10 @@ except Exception:
                 visual_paths=$(echo "$input_list" | cut -f1)
                 all_files=("${(@f)visual_paths}")
 
-                echo "default" > "/tmp/jukebox-sort-state-$$"
+                echo "default" > "$_jukebox_runtime/sort-state"
                 local output
                 output=$(echo "$input_list" | \
-                    fzf -i --multi \
+                    _jukebox_fzf -i --multi \
                         --delimiter=$'\t' --with-nth=2 \
                         --prompt="Pick start song(s): " \
                         --header="$fzf_header" \
@@ -261,7 +261,7 @@ except Exception:
                 fi
 
                 local current_sort
-                current_sort=$(cat "/tmp/jukebox-sort-state-$$" 2>/dev/null)
+                current_sort=$(cat "$_jukebox_runtime/sort-state" 2>/dev/null)
                 if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
                     local sorted_paths
                     sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
@@ -325,7 +325,7 @@ except Exception:
 
                 local selected
                 selected=$(echo "$input_list" | \
-                    fzf -i --multi \
+                    _jukebox_fzf -i --multi \
                         --delimiter=$'\t' --with-nth=2 \
                         --prompt="Queue: " \
                         --header="$fzf_header" \
@@ -404,7 +404,7 @@ except Exception:
         export _JUKEBOX_SOCK="$mpvsock"
         export _JUKEBOX_QUEUEFILE="$queuefile"
 
-        local script_dir=$(mktemp -d /tmp/jukebox-scripts-XXXXXX)
+        local script_dir=$(mktemp -d "$_jukebox_runtime/scripts.XXXXXXXX")
         local fetch_script="$script_dir/fetch.sh"
         local del_script="$script_dir/del.sh"
         local move_script="$script_dir/move.sh"
@@ -481,12 +481,7 @@ if queuefile:
 def resolve_name(fp):
     if fp in cache:
         return cache[fp]
-    name = fp.rsplit("/", 1)[-1]
-    if name.endswith(".flac"):
-        name = name[:-5]
-    elif name.endswith(".mp3"):
-        name = name[:-4]
-    return name
+    return os.path.splitext(os.path.basename(fp))[0]
 
 # Find current position
 cur_pos = 0
@@ -556,7 +551,7 @@ except Exception: pass
 
 # Remove from queuefile tracker
 if [[ -n "$item_id" && -f "$_JUKEBOX_QUEUEFILE" ]]; then
-    tmp=$(mktemp)
+    tmp=$(mktemp "${_JUKEBOX_QUEUEFILE}.XXXXXXXX")
     found=0
     while IFS= read -r line; do
         if [[ "$found" -eq 0 && "$line" == "$item_id" ]]; then
@@ -779,7 +774,7 @@ CLEAREOF
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
         local output
-        output=$("$fetch_script" | fzf -i \
+        output=$("$fetch_script" | _jukebox_fzf -i \
             --delimiter=$'\t' --with-nth=2.. \
             --header-lines=2 \
             --prompt='Queue: ' \

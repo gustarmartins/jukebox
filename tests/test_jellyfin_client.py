@@ -161,6 +161,15 @@ class JellyfinClientTest(unittest.TestCase):
         track.with_suffix(".lrc").write_text("[00:01.00]Sidecar line\n")
         self.assertEqual(jellyfin.local_lyrics(str(track)), [(1000, "Sidecar line")])
 
+    def test_lrc_repeated_timestamps_offsets_and_enhanced_word_tags(self):
+        self.assertEqual(
+            jellyfin.parse_lrc("\ufeff[offset:-100]\n[00:01.25][00:05.00]<00:01.25>Hello <00:01.50>world"),
+            [(1150, "Hello world"), (4900, "Hello world")],
+        )
+
+    def test_lyrics_and_metadata_strip_terminal_control_characters(self):
+        self.assertEqual(jellyfin.clean_field("a\x1bb\x1fc\t\r\n"), "a b c   ")
+
 
 if __name__ == "__main__":
     unittest.main()

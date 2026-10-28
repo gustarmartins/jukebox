@@ -8,16 +8,62 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).parents[1] / "jukebox" / "jukebox.zsh"
-SCAN_START = '    "$_JUKEBOX_PYTHON" -c "\n'
-SCAN_END = '\n" "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" "$cachefile" &'
-
-
-def local_scan_source() -> str:
-    shell_source = SCRIPT.read_text(encoding="utf-8")
-    return shell_source.split(SCAN_START, 1)[1].split(SCAN_END, 1)[0]
+LIBRARY = SCRIPT.parent / "src" / "library.py"
 
 
 class LocalLibraryScanTest(unittest.TestCase):
+    def test_local_startup_preserves_jellyfin_snapshot_in_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            music = root / "music"
+            music.mkdir()
+            data = root / "data"
+            data.mkdir()
+            other_snapshot = data / "session-jellyfin.state.tmp.9876"
+            other_snapshot.write_text("active other-source snapshot\n")
+            env = {**os.environ, "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+                   "XDG_CACHE_HOME": str(root / "cache"), "JUKEBOX_SOURCE": "local",
+                   "JUKEBOX_DATA_DIR": str(data), "JUKEBOX_MUSIC_DIR": str(music)}
+            result = subprocess.run(["zsh", "-dfc", f"source {shlex.quote(str(SCRIPT))}; jukebox"],
+                                    input="q\n", env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(other_snapshot.read_text(), "active other-source snapshot\n")
+
+    def test_play_from_selection_follows_the_visible_title_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            music = root / "music"
+            music.mkdir()
+            first_by_title = music / "Z filename.flac"
+            last_by_title = music / "A filename.flac"
+            first_by_title.touch()
+            last_by_title.touch()
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            scripts = {
+                "ffprobe": "#!/usr/bin/env python3\nimport json, os, sys\n"
+                           "title = 'Alpha' if os.path.basename(sys.argv[-1]).startswith('Z') else 'Zulu'\n"
+                           "print(json.dumps({'format': {'duration':'1', 'tags':{'title':title}}}))\n",
+                "fzf": "#!/usr/bin/env python3\nimport sys\nrows=sys.stdin.read().splitlines()\nprint('enter')\nprint(rows[0])\n",
+                "mpv": "#!/usr/bin/env python3\nimport os, pathlib, sys\n"
+                       "playlist=next(arg.split('=',1)[1] for arg in sys.argv if arg.startswith('--playlist='))\n"
+                       "pathlib.Path(os.environ['JUKEBOX_TEST_PLAYLIST']).write_text(pathlib.Path(playlist).read_text())\n",
+            }
+            for name, content in scripts.items():
+                command = fake_bin / name
+                command.write_text(content)
+                command.chmod(0o755)
+            captured = root / "captured.m3u"
+            env = {**os.environ, "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+                   "JUKEBOX_DATA_DIR": str(root / "data"), "JUKEBOX_MUSIC_DIR": str(music),
+                   "JUKEBOX_SOURCE": "local", "JUKEBOX_TEST_PLAYLIST": str(captured),
+                   "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+            result = subprocess.run(["zsh", "-dfc", f"source {shlex.quote(str(SCRIPT))}; jukebox"],
+                                    input="6\n", env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)  # Stub intentionally never starts a player.
+            self.assertTrue(captured.exists(), result.stdout + result.stderr)
+            self.assertEqual(captured.read_text().splitlines(), [str(first_by_title), str(last_by_title)])
+
     def test_scan_indexes_flac_and_mp3_recursively(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -47,7 +93,7 @@ class LocalLibraryScanTest(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
             result = subprocess.run(
-                ["python3", "-c", local_scan_source(), str(library), str(cache)],
+                ["python3", str(LIBRARY), "scan", str(library), str(cache)],
                 env=env,
                 capture_output=True,
                 text=True,

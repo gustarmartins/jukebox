@@ -136,7 +136,7 @@ def request(
 def clean_field(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value))
 
 
 def item_stream_url(config: dict[str, Any], item: dict[str, Any]) -> str:
@@ -306,22 +306,27 @@ def normalize_lyrics(payload: Any) -> list[tuple[int, str]]:
     return output
 
 
-LRC_RE = re.compile(r"\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\](.*)")
+LRC_RE = re.compile(r"\[(\d{1,3}):([0-5]\d)(?:[.:](\d{1,3}))?\]")
+WORD_TIME_RE = re.compile(r"<\d{1,3}:[0-5]\d(?:[.:]\d{1,3})?>")
 
 
 def parse_lrc(text: str) -> list[tuple[int, str]]:
     output: list[tuple[int, str]] = []
     plain: list[str] = []
+    offsets = re.findall(r"\[offset:\s*([+-]?\d+)\s*\]", text, flags=re.IGNORECASE)
+    offset_ms = int(offsets[-1]) if offsets else 0
     for raw_line in text.splitlines():
+        raw_line = raw_line.lstrip("\ufeff")
         matches = list(LRC_RE.finditer(raw_line))
         if matches:
+            # Repeated timestamps share the same lyric (choruses, for example).
+            lyric = clean_field(WORD_TIME_RE.sub("", raw_line[matches[-1].end():]).strip())
             for match in matches:
                 fraction = match.group(3) or "0"
                 millis = int((fraction + "00")[:3])
                 start_ms = (int(match.group(1)) * 60 + int(match.group(2))) * 1000 + millis
-                lyric = match.group(4).strip()
                 if lyric:
-                    output.append((start_ms, clean_field(lyric)))
+                    output.append((max(0, start_ms + offset_ms), lyric))
         elif raw_line.strip() and not re.match(r"^\[[a-zA-Z]+:", raw_line):
             plain.append(clean_field(raw_line.strip()))
     if output:

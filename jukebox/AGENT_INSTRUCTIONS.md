@@ -17,10 +17,13 @@ Welcome, fellow AI/LLM Coding Assistant! The user has explicitly designated this
 
 ## Project Architecture
 
-Jukebox is a **single-file Zsh function** (`jukebox.zsh`) that runs as a TUI music player inside the user's terminal. It is sourced into `~/.zshrc` and invoked by typing `jukebox`.
+Jukebox is a **modular Zsh function** (`jukebox.zsh` plus `src/*.zsh`) that runs as a TUI music player inside the user's terminal. It is sourced into `~/.zshrc` and invoked by typing `jukebox`.
 
 ### Key Components
-- **`jukebox.zsh`** — The entire application (~1400 lines). Contains a single `jukebox()` function with nested helper functions.
+- **`jukebox.zsh`** — Startup, menus, player lifetime, render loop, and Nightcore.
+- **`src/*.zsh`** — IPC, controls, queue, session, metadata, lyrics, and UI helpers.
+- **`src/library.py`** — Shared discovery/indexing/live updates and bounded metadata details.
+- **`src/process.py`** — Linux parent-death signal for the owned mpv child.
 - **`_fzf_preview.py`** — External Python script called by fzf for rich song previews.
 - **mpv** — Headless audio backend, controlled via Unix socket IPC (`--input-ipc-server`).
 - **fzf** — Interactive menu frontend for browsing, sorting, and queue building.
@@ -28,7 +31,7 @@ Jukebox is a **single-file Zsh function** (`jukebox.zsh`) that runs as a TUI mus
 - **ffmpeg/ffprobe** — Extracts album art and metadata tags from FLAC files.
 
 ### Data Flow
-1. User launches `jukebox` → startup orphan sweep → incremental cache rebuild → menu
+1. User launches `jukebox` → per-source writer lock → private runtime directory → incremental cache rebuild → menu
 2. User picks a mode → Zsh builds a file array → writes playlist to temp `.m3u` → starts mpv
 3. Main loop polls mpv via Python Unix socket IPC (`_jukebox_batch_get`) → renders TUI
 4. On exit → `_jukebox_cleanup` kills mpv, removes temp files, unsets env vars
@@ -39,12 +42,13 @@ Jukebox is a **single-file Zsh function** (`jukebox.zsh`) that runs as a TUI mus
 | Metadata cache | `~/.jukebox-app/metadata.tsv` | ✅ Yes |
 | Session state | `~/.jukebox-app/session[-jellyfin].state` | ✅ Yes |
 | Session queue | `~/.jukebox-app/session[-jellyfin].m3u` | ✅ Yes |
-| Playlist | `/tmp/jukebox-XXXXXX.m3u` | No |
-| mpv IPC socket | `$XDG_RUNTIME_DIR/jukebox-mpv-XXXXXX.sock` | No |
-| Cover art (current) | `/tmp/jukebox-cover-XXXXXX.jpg` | No |
-| Cover art (next) | `/tmp/jukebox-cover-next-XXXXXX.jpg` | No |
-| Sort scripts | `/tmp/jukebox-sort-XXXXXX/` | No |
-| Queue tracker | `/tmp/jukebox-queue-$$.txt` | No |
+| Runtime files | `$XDG_RUNTIME_DIR/jukebox.XXXXXXXX/` (fallback `/tmp`) | No |
+| Index fingerprints | `$JUKEBOX_DATA_DIR/metadata.tsv.files.json` | Yes |
+| Player locks | `$JUKEBOX_DATA_DIR/player-{source}.lock` | Yes |
+
+The runtime directory is mode 0700 and owns the socket, playlist, art, preview,
+queue tracker, generated scripts and logs. Never globally sweep `/tmp/jukebox-*`
+or kill players by command-line pattern: another session may own them.
 
 ---
 
@@ -77,7 +81,7 @@ If `_jukebox_cleanup` is called by the `EXIT` trap and it `unfunction`s itself, 
 **Rule:** Never `unfunction` the cleanup handler. It already `trap -` to untrap itself first.
 
 ### 5. `setopt localtraps` means traps die with the function
-Traps set with `localtraps` active are scoped to the function. If the function exits abnormally, the trap may not fire. The startup orphan sweep exists as a safety net for this.
+Traps set with `localtraps` active are scoped to the function. If the function exits abnormally, the trap may not fire. The outer `always` block performs cleanup on returns and handled signals.
 
 ---
 
@@ -110,9 +114,9 @@ Some FLACs (especially from Tidal/Qobuz) embed cover art in non-standard sub-for
 ## Cache System
 
 The metadata cache at `~/.jukebox-app/metadata.tsv` is **persistent** and **incremental**:
-- Format: `filepath\ttitle\tartist\talbum\tdate\tduration` (tab-separated, 6 fields)
-- On launch, the Python builder diffs disk vs cache and only probes NEW files
-- An `inotifywait` background watcher hot-appends new files during playback
+- Format: `filepath\ttitle\tartist\talbum\tdate\tduration\ttrack\tdisc` (8 fields)
+- On launch, `library.py` compares size/mtime fingerprints and probes new/changed files
+- An `inotifywait` watcher runs the same locked, atomic update code
 - The cache is NEVER deleted on exit — only session temp files are cleaned up
 
 **Rule:** Do NOT move the cache back to `/tmp/` or to `~/.cache/` (cache
@@ -152,27 +156,31 @@ Any new early-return path after that MUST still unpause.
 
 ## Cleanup System
 
-The cleanup system has three layers:
-1. **Startup sweep** — kills orphaned mpv processes, removes stale temp files from `/tmp/`
-2. **Exit trap** — `_jukebox_cleanup` handles `INT TERM HUP QUIT PIPE EXIT` signals
-3. **`setopt nomonitor`** — suppresses `[job] + done` messages from background tasks
+`jukebox()` acquires a per-source writer lock and allocates a private runtime
+directory. The outer Zsh `always` block handles all returns and signals, invoking
+player or startup cleanup as appropriate, deleting only the owned directory,
+and releasing the lock. The Linux mpv wrapper terminates its child when the
+launching shell dies. No global orphan killing or temporary-file sweep is used.
 
-**Rule:** When adding new temp files or background processes, add them to BOTH the startup sweep AND `_jukebox_cleanup`. Always use `(N)` null-glob on startup sweep patterns.
+**Rule:** Put new session temporary files inside `$_jukebox_runtime`, and stop
+owned background processes in `_jukebox_stop_startup_jobs` or player cleanup.
+Never delete persistent caches, state, playlists, or a live writer's lock file.
 
-**Rule:** When adding new exported env vars, add `unset` calls to BOTH the startup sweep AND `_jukebox_cleanup`.
+**Rule:** When adding exported environment variables, unset them in cleanup.
 
----
+**Rule:** Preserve user settings you do not own. Setup updates only `music_dir`;
+osu! keys and unknown keys survive. Keep the existing osu! scanner integration.
 
 ## Testing Checklist
 
-Before pushing any change, mentally verify:
+Run `python3 -m pytest -q`, check each Zsh file with `zsh -n`, and verify:
 - [ ] No `local` declarations inside the main `while` loop
 - [ ] No bare glob patterns without `(N)` in cleanup code
 - [ ] No `jq -n` without `-c` flag for mpv IPC
 - [ ] No `\t` as IFS delimiter in `read` — use `\x1f`
 - [ ] Cover art extraction uses `-vcodec mjpeg`, not `-vcodec copy`
-- [ ] New temp files are cleaned up in both startup sweep AND exit cleanup
-- [ ] New exported env vars are unset in both startup sweep AND exit cleanup
+- [ ] New temp files live in the owned runtime directory and get cleaned on all exits
+- [ ] New exported env vars are unset in cleanup
 - [ ] New background processes are killed in `_jukebox_cleanup`
 - [ ] The persistent cache (`~/.jukebox-app/metadata.tsv`) is never deleted
 - [ ] Session state files are never deleted by cleanup or the startup sweep

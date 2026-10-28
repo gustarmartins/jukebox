@@ -30,7 +30,8 @@ package() {
   install -Dm755 jukebox/_fzf_preview.py "${pkgdir}/usr/share/${pkgname}/_fzf_preview.py"
   install -Dm755 jukebox/jellyfin_client.py "${pkgdir}/usr/share/${pkgname}/jellyfin_client.py"
   install -d "${pkgdir}/usr/share/${pkgname}/src"
-  install -m644 jukebox/src/*.zsh "${pkgdir}/usr/share/${pkgname}/src/"
+  install -m644 jukebox/src/*.zsh jukebox/src/*.py "${pkgdir}/usr/share/${pkgname}/src/"
+  install -Dm644 jukebox/assets/NO-COVER.png "${pkgdir}/usr/share/${pkgname}/assets/NO-COVER.png"
   install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

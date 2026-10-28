@@ -1,11 +1,11 @@
 #!/usr/bin/env zsh
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  🎵 Jukebox — Terminal FLAC Player                             ║
-# ║  A zsh function that plays FLAC files with album art,          ║
+# ║  🎵 Jukebox — Terminal Music Player                            ║
+# ║  A zsh function that plays local/remote music with album art, ║
 # ║  queue building, fzf browsing, and interactive controls.       ║
 # ║  Also includes a `nightcore` command for speed/pitch remixing. ║
 # ║                                                                ║
-# ║  Dependencies: mpv, fzf, chafa, ffmpeg, socat, jq, sox         ║
+# ║  Dependencies: mpv, fzf, chafa, ffmpeg, python3; sox optional  ║
 # ║                                                                ║
 # ║  Setup: Add this line to your ~/.zshrc:                        ║
 # ║    source ~/Jukebox/jukebox/jukebox.zsh                        ║
@@ -24,12 +24,16 @@ typeset -g _JUKEBOX_MUSIC_DIR_CONFIGURED=0
 
 if (( ${+parameters[JUKEBOX_MUSIC_DIR]} )) && [[ -n "$JUKEBOX_MUSIC_DIR" ]]; then
     _JUKEBOX_MUSIC_DIR_EXPLICIT=1
-elif [[ -r "$_JUKEBOX_SETTINGS_FILE" ]]; then
+fi
+if [[ -r "$_JUKEBOX_SETTINGS_FILE" ]]; then
     while IFS=$'\t' read -r _jukebox_setting _jukebox_value; do
-        if [[ "$_jukebox_setting" == "music_dir" && -n "$_jukebox_value" ]]; then
+        if [[ "$_jukebox_setting" == "music_dir" && -n "$_jukebox_value" ]] && (( ! _JUKEBOX_MUSIC_DIR_EXPLICIT )); then
             JUKEBOX_MUSIC_DIR="$_jukebox_value"
             _JUKEBOX_MUSIC_DIR_CONFIGURED=1
-            break
+        elif [[ "$_jukebox_setting" == "osu_dir" && -n "$_jukebox_value" ]]; then
+            _JUKEBOX_OSU_DIR="$_jukebox_value"
+        elif [[ "$_jukebox_setting" == "osu_filters" && -n "$_jukebox_value" ]]; then
+            _JUKEBOX_OSU_FILTERS="$_jukebox_value"
         fi
     done < "$_JUKEBOX_SETTINGS_FILE"
 fi
@@ -47,13 +51,23 @@ _JUKEBOX_JELLYFIN_CLIENT="${_JUKEBOX_SCRIPT_DIR}/jellyfin_client.py"
 _jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
 
 _jukebox_save_music_dir() {
-    local music_dir="$1" config_tmp
+    local music_dir="$1" config_tmp config_line
 
     mkdir -p "$_JUKEBOX_CONFIG_DIR" || return 1
     chmod 700 "$_JUKEBOX_CONFIG_DIR" 2>/dev/null
     config_tmp=$(mktemp "${_JUKEBOX_CONFIG_DIR}/settings.XXXXXX") || return 1
     chmod 600 "$config_tmp" 2>/dev/null
-    print -r -- $'music_dir\t'"$music_dir" > "$config_tmp"
+    if [[ "$music_dir" == *$'\n'* || "$music_dir" == *$'\r'* || "$music_dir" == *$'\t'* ]]; then
+        command rm -f "$config_tmp"
+        print -u2 -- "Music directory cannot contain tabs or newlines."
+        return 1
+    fi
+    if [[ -r "$_JUKEBOX_SETTINGS_FILE" ]]; then
+        while IFS= read -r config_line; do
+            [[ "$config_line" == music_dir$'\t'* ]] || print -r -- "$config_line"
+        done < "$_JUKEBOX_SETTINGS_FILE" > "$config_tmp"
+    fi
+    print -r -- $'music_dir\t'"$music_dir" >> "$config_tmp"
     command mv -f "$config_tmp" "$_JUKEBOX_SETTINGS_FILE"
     chmod 600 "$_JUKEBOX_SETTINGS_FILE" 2>/dev/null
 }
@@ -72,7 +86,7 @@ _jukebox_configure_music_dir() {
     fi
 
     echo "🎵 First-time Jukebox setup"
-    echo "Choose the folder that contains your FLAC music library."
+    echo "Choose the folder that contains your music library."
     while true; do
         print -n "Music directory [$default_dir]: "
         IFS= read -r answer || return 1
@@ -110,14 +124,47 @@ jukebox() {
     # Suppress zsh job control messages ("+ done" etc) for background tasks
     setopt localoptions localtraps nomonitor
 
+    local _jukebox_runtime="" _jukebox_lockfd="" _jukebox_mpv_pid=""
+    local _jukebox_player_started=0 _jukebox_startup_ready=0
+    {
     local _jukebox_debug=0
-    local _jukebox_debuglog="/tmp/jukebox-debug.log"
+    local _jukebox_debuglog=""
     local _jukebox_show_formatnames=1
     local _jukebox_source="${JUKEBOX_SOURCE:l}"
 
     # Connection management intentionally runs before any player temp files or
     # terminal state are created.
     case "$1" in
+        --help|-h|help)
+            cat <<'HELPEOF'
+Jukebox — terminal music player
+Usage: jukebox [--debug] [--show-filenames|--show-formatnames]
+       jukebox setup | doctor | jellyfin-login SERVER | jellyfin-status | jellyfin-logout
+
+Local audio: FLAC, MP3, Ogg, Opus, M4A, AAC, WAV, AIFF, ALAC, APE, WavPack.
+Set JUKEBOX_SOURCE=local (default) or jellyfin.
+Playback: Space pause; ,/. previous/next; arrows seek; +/- volume; M mute;
+          T repeat off/track/queue; A add next; L queue; S shuffle; N new queue;
+          Y lyrics; [/] speed/pitch; P effect mode; R reset; ? help; Q quit.
+HELPEOF
+            return 0
+            ;;
+        doctor)
+            local tool missing=0
+            for tool in zsh mpv fzf ffmpeg ffprobe chafa python3; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                    print -r -- "✓ $tool"
+                else
+                    print -r -- "✗ $tool (required)"
+                    missing=1
+                fi
+            done
+            command -v inotifywait >/dev/null 2>&1 && print '✓ Live library refresh' || print '○ Live refresh: install inotify-tools (optional)'
+            print -r -- "Source: $_jukebox_source"
+            print -r -- "Music: $JUKEBOX_MUSIC_DIR"
+            print -r -- "Data: $JUKEBOX_DATA_DIR"
+            return $missing
+            ;;
         setup|configure)
             _jukebox_configure_music_dir 1
             return $?
@@ -150,8 +197,6 @@ jukebox() {
         case "$1" in
             --debug|-d)
                 _jukebox_debug=1
-                : > "$_jukebox_debuglog"
-                echo "🔧 Debug mode ON → tail -f $_jukebox_debuglog"
                 shift
                 ;;
             --show-filenames)
@@ -169,27 +214,14 @@ jukebox() {
         esac
     done
 
-    # --- clean up orphaned files from previous crashed sessions ---
-    # Runs on every launch as a safety net for scenarios where exit
-    # cleanup cannot fire (SIGKILL, terminal crash, compositor restart,
-    # OOM-kill, power loss, etc.)
-    if pgrep -f 'input-ipc-server=.*jukebox-mpv' >/dev/null 2>&1; then
-        pkill -f 'input-ipc-server=.*jukebox-mpv' 2>/dev/null
-        sleep 0.2
-        pkill -9 -f 'input-ipc-server=.*jukebox-mpv' 2>/dev/null
-    fi
-    command rm -f /tmp/jukebox-cover-*.jpg(N) /tmp/jukebox-cover-next-*.jpg(N) 2>/dev/null
-    command rm -f /tmp/jukebox-fzf-preview-*.jpg(N) 2>/dev/null
-    command rm -f /tmp/jukebox-queue-*.txt(N) 2>/dev/null
-    command rm -f /tmp/jukebox-*.m3u(N) /tmp/jukebox-py.log 2>/dev/null
-    command rm -f /tmp/jukebox-watch-*.fifo(N) 2>/dev/null
-    command rm -f /tmp/jukebox-mpv-auth-*.conf(N) 2>/dev/null
-    command rm -rf /tmp/jukebox-sort-*(N) /tmp/jukebox-scripts-*(N) 2>/dev/null
-    command rm -f /tmp/jukebox-sort-state-*(N) 2>/dev/null
-    command rm -f "${XDG_RUNTIME_DIR:-/tmp}"/jukebox-mpv-*.sock(N) 2>/dev/null
-    unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
-          _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
-
+    # Fail before allocating resources when a required dependency is missing.
+    local tool
+    for tool in mpv fzf ffmpeg ffprobe chafa; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            print -u2 -- "Missing dependency: $tool. Run 'jukebox doctor' for details."
+            return 1
+        fi
+    done
 
     _jukebox_log() {
         (( _jukebox_debug )) && printf '[%s] %s\n' "$SECONDS" "$*" >> "$_jukebox_debuglog"
@@ -205,22 +237,39 @@ jukebox() {
     export _JUKEBOX_PYTHON
     export _JUKEBOX_SCRIPT_DIR
 
-    local playlist=$(mktemp /tmp/jukebox-XXXXXX.m3u)
-    local mpvsock=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/jukebox-mpv-XXXXXX.sock")
-    local coverfile=$(mktemp /tmp/jukebox-cover-XXXXXX.jpg)
-    local coverfile_next=$(mktemp /tmp/jukebox-cover-next-XXXXXX.jpg)
-    local _jukebox_prevtmp="/tmp/jukebox-fzf-preview-$$.jpg"
-    local queuefile="/tmp/jukebox-queue-$$.txt"
-    local mpv_auth_config=""
     local _jukebox_datadir="${JUKEBOX_DATA_DIR:-$HOME/.jukebox-app}"
-    mkdir -p "$_jukebox_datadir"
+    mkdir -p "$_jukebox_datadir" || return 1
+    # One writer per source protects the cache and resumable queue. A second
+    # launch never terminates an existing player or deletes its temporary files.
+    zmodload zsh/system || return 1
+    : >> "$_jukebox_datadir/player-$_jukebox_source.lock" || return 1
+    if ! zsystem flock -t 0 -f _jukebox_lockfd "$_jukebox_datadir/player-$_jukebox_source.lock" 2>/dev/null; then
+        print -u2 -- "Jukebox is already using this $_jukebox_source library."
+        return 1
+    fi
+    _jukebox_runtime=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/jukebox.XXXXXXXX") || return 1
+    chmod 700 "$_jukebox_runtime"
+    local playlist="$_jukebox_runtime/playlist.m3u"
+    local mpvsock="$_jukebox_runtime/mpv.sock"
+    local coverfile="$_jukebox_runtime/cover.jpg"
+    local coverfile_next="$_jukebox_runtime/cover-next.jpg"
+    local _jukebox_prevtmp="$_jukebox_runtime/preview.jpg"
+    local queuefile="$_jukebox_runtime/queue.txt"
+    local mpv_auth_config=""
+    _jukebox_debuglog="$_jukebox_runtime/debug.log"
+    export _JUKEBOX_RUNTIME="$_jukebox_runtime"
+    (( _jukebox_debug )) && print -r -- "Debug log: $_jukebox_debuglog"
     # One-time migration from the pre-0.x location. ~/.cache is fair game for
     # cleaners (and shared with any other app named "jukebox"), so the library
     # cache and saved sessions moved out of it. Existing files are carried over
     # instead of being re-probed from scratch.
     local _jukebox_olddir="${XDG_CACHE_HOME:-$HOME/.cache}/jukebox" _mig_f
     if [[ -d "$_jukebox_olddir" && "$_jukebox_olddir" != "$_jukebox_datadir" ]]; then
-        for _mig_f in "$_jukebox_olddir"/*(N); do
+        local -a _migration_names=(metadata.tsv session.state session.m3u)
+        [[ "$_jukebox_source" == jellyfin ]] && _migration_names=(metadata-jellyfin.tsv session-jellyfin.state session-jellyfin.m3u)
+        for _mig_f in "${_migration_names[@]}"; do
+            _mig_f="$_jukebox_olddir/$_mig_f"
+            [[ -f "$_mig_f" ]] || continue
             [[ -e "$_jukebox_datadir/${_mig_f:t}" ]] || command mv -f "$_mig_f" "$_jukebox_datadir/" 2>/dev/null
         done
         command rmdir "$_jukebox_olddir" 2>/dev/null
@@ -235,7 +284,7 @@ jukebox() {
     fi
     # Half-written snapshots from a session that died mid-save (the exact
     # scenario this feature guards against) never get an atomic mv.
-    command rm -f "$_jukebox_datadir"/session*.tmp.*(N) \
+    command rm -f "$_jukebox_state_file".tmp.*(N) "$_jukebox_state_playlist".tmp.*(N) \
         "$cachefile".tmp.*(N) 2>/dev/null
 
     # Saved-session state, populated by _jukebox_load_state (src/session.zsh).
@@ -243,16 +292,20 @@ jukebox() {
     local _resume_source="" _resume_ended="" _resume_pos=0 _resume_count=0
     local _resume_time=0 _resume_duration=0 _resume_speed="1.0" _resume_pitch="1.0"
     local _resume_apc="true" _resume_rtmode="tempo" _resume_lyrics=0
+    local _resume_volume="" _resume_mute="false" _resume_repeat="off"
     local _resume_path="" _resume_title="" _resume_artist="" _resume_album=""
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
     export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
+
+    local _ui_reset _ui_text _ui_secondary _ui_accent _ui_title _ui_key _ui_key_active
 
     # --- Load Modules ---
     for mod in "$_JUKEBOX_SCRIPT_DIR/src/"*.zsh; do
         source "$mod"
     done
 
+    _jukebox_theme_init
     typeset -g _jukebox_cleaned=""
     local _jukebox_art_text=""
     local saved_stty=$(stty -g 2>/dev/null)
@@ -260,11 +313,11 @@ jukebox() {
     local _cache_pid=""
     local _watcher_pid=""
     local _watcher_reader_pid=""
-    local _watcher_fifo="/tmp/jukebox-watch-$$.fifo"
+    local _watcher_fifo="$_jukebox_runtime/watch.fifo"
 
     # Cache sync and the recursive watcher start before the launch menu. Keep
     # their cleanup available to every early return, and arm it for signals.
-    # The full player cleanup trap replaces this one later.
+    # The outer always block picks the appropriate startup/player cleanup.
     _jukebox_stop_startup_jobs() {
         if [[ -n "$_cache_pid" ]]; then
             if kill -0 "$_cache_pid" 2>/dev/null; then
@@ -290,7 +343,9 @@ jukebox() {
         fi
         command rm -f "$_watcher_fifo" 2>/dev/null
     }
-    trap _jukebox_stop_startup_jobs INT TERM HUP QUIT PIPE
+    _jukebox_startup_ready=1
+    trap 'return 130' INT
+    trap 'return 143' TERM HUP QUIT PIPE
 
     if [[ "$_jukebox_source" == "jellyfin" ]]; then
         echo "⏳ Syncing Jellyfin music library..."
@@ -298,168 +353,55 @@ jukebox() {
             return 1
         fi
     else
-    # --- build/update persistent metadata cache (incremental) ---
-    # On first run: full scan. On subsequent runs: only probe NEW files,
-    # remove entries for DELETED files. Makes repeated launches near-instant.
-    "$_JUKEBOX_PYTHON" -c "
-import subprocess, json, os, sys
-from concurrent.futures import ThreadPoolExecutor
-musicdir = sys.argv[1]
-cache_path = sys.argv[2]
-
-# Discover all supported local audio files on disk
-disk_files = set()
-for root, dirs, files in os.walk(musicdir):
-    for f in sorted(files):
-        f_lower = f.lower()
-        if f_lower.endswith('.flac') or f_lower.endswith('.mp3'):
-            disk_files.add(os.path.join(root, f))
-
-# Load existing cache entries.
-# Cache value layout: title\tartist\talbum\tdate\tdur\ttrack\tdisc (7 fields).
-# Entries written by an older format (fewer fields) are dropped so they get
-# re-probed, which transparently migrates the cache on first launch.
-cached = {}
-if os.path.exists(cache_path):
-    with open(cache_path) as fh:
-        for line in fh:
-            parts = line.rstrip('\n').split('\t', 1)
-            if len(parts) == 2 and parts[1].count('\t') == 6:
-                cached[parts[0]] = parts[1]
-
-# Find new files that need probing
-new_files = disk_files - set(cached.keys())
-# Remove entries for files that no longer exist
-deleted = set(cached.keys()) - disk_files
-for d in deleted:
-    del cached[d]
-
-# Probe new files concurrently. A small pool keeps HDD pressure reasonable but
-# avoids making a large first MP3 import look permanently stuck.
-def probe(fp):
-    try:
-        r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
-                           capture_output=True, text=True, timeout=10)
-        d = json.loads(r.stdout)
-        tags = d.get('format',{}).get('tags',{})
-        get = lambda k: tags.get(k, tags.get(k.upper(), ''))
-        def numtag(default, *keys):
-            for k in keys:
-                v = str(get(k)).split('/')[0].strip()
-                if v:
-                    try: return str(int(v))
-                    except ValueError: pass
-            return default
-        f = os.path.basename(fp)
-        title = get('title') or os.path.splitext(f)[0]
-        artist = get('artist') or 'Unknown'
-        album = get('album') or 'Unknown'
-        date = get('date') or '0'
-        dur = d.get('format',{}).get('duration','0')
-        track = numtag('0','track','tracknumber')   # 0 = unknown, sorts first
-        disc = numtag('1','disc','discnumber')       # 1 = assume single-disc
-        value = f'{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}'
-        return fp, value
-    except Exception:
-        return fp, None
-
-ordered_new = sorted(new_files)
-if ordered_new:
-    print(f'Library cache: probing {len(ordered_new)} new tracks...', file=sys.stderr, flush=True)
-    with ThreadPoolExecutor(max_workers=min(4, len(ordered_new))) as executor:
-        for index, (fp, value) in enumerate(executor.map(probe, ordered_new), 1):
-            if value is not None:
-                cached[fp] = value
-            if index % 25 == 0 or index == len(ordered_new):
-                print(f'Library cache: {index}/{len(ordered_new)} tracks', file=sys.stderr, flush=True)
-
-# Replace the cache atomically. Startup cleanup may stop this background sync;
-# an interrupted refresh must never truncate the last known-good library.
-cache_tmp = f'{cache_path}.tmp.{os.getpid()}'
-try:
-    with open(cache_tmp, 'w') as out:
-        for fp in sorted(cached.keys()):
-            out.write(f'{fp}\t{cached[fp]}\n')
-    os.replace(cache_tmp, cache_path)
-finally:
-    try:
-        os.unlink(cache_tmp)
-    except FileNotFoundError:
-        pass
-
-if new_files or deleted:
-    print(f'Cache: +{len(new_files)} new, -{len(deleted)} removed', file=sys.stderr)
-" "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" "$cachefile" &
+    # One implementation handles discovery, incremental refresh and live edits.
+    "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/library.py" scan \
+        "$JUKEBOX_MUSIC_DIR" "$cachefile" \
+        --osu-dir "${_JUKEBOX_OSU_DIR:-}" --osu-filters "${_JUKEBOX_OSU_FILTERS:-}" &
     _cache_pid=$!
 
-    # --- live directory watcher (detects new .flac files during playback) ---
     if command -v inotifywait >/dev/null 2>&1 && command mkfifo "$_watcher_fifo"; then
-        inotifywait -m -r -e close_write,moved_to --format '%w%f' \
-            "${JUKEBOX_MUSIC_DIR:-$HOME/Music}" > "$_watcher_fifo" 2>/dev/null &
+        inotifywait -m -r -e close_write,moved_to,moved_from,delete --format '%w%f' \
+            "$JUKEBOX_MUSIC_DIR" > "$_watcher_fifo" 2>/dev/null &
         _watcher_pid=$!
         (
-            while read -r newfile; do
-                [[ "${newfile:l}" != *.flac && "${newfile:l}" != *.mp3 ]] && continue
-                # Check if already in cache
-                grep -qF "$newfile" "$cachefile" 2>/dev/null && continue
-                # Probe and append
-                "$_JUKEBOX_PYTHON" -c "
-import subprocess, json, os, sys
-fp = sys.argv[1]
-cache_path = sys.argv[2]
-try:
-    r = subprocess.run(['ffprobe','-v','quiet','-print_format','json','-show_format',fp],
-                       capture_output=True, text=True, timeout=10)
-    d = json.loads(r.stdout)
-    tags = d.get('format',{}).get('tags',{})
-    get = lambda k: tags.get(k, tags.get(k.upper(), ''))
-    def numtag(default, *keys):
-        for k in keys:
-            v = str(get(k)).split('/')[0].strip()
-            if v:
-                try: return str(int(v))
-                except ValueError: pass
-        return default
-    f = os.path.basename(fp)
-    title = get('title') or os.path.splitext(f)[0]
-    artist = get('artist') or 'Unknown'
-    album = get('album') or 'Unknown'
-    date = get('date') or '0'
-    dur = d.get('format',{}).get('duration','0')
-    track = numtag('0','track','tracknumber')
-    disc = numtag('1','disc','discnumber')
-    with open(cache_path, 'a') as out:
-        out.write(f'{fp}\t{title}\t{artist}\t{album}\t{date}\t{dur}\t{track}\t{disc}\n')
-except: pass
-" "$newfile" "$cachefile"
+            while IFS= read -r newfile; do
+                "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/library.py" update \
+                    "$JUKEBOX_MUSIC_DIR" "$cachefile" --path "$newfile"
             done
         ) < "$_watcher_fifo" &
         _watcher_reader_pid=$!
     fi
     fi
 
-    _jukebox_setup_fzf_sort() {
+    _jukebox_wait_cache() {
+        local _cache_status=0
         if [[ -n "$_cache_pid" ]]; then
             if kill -0 "$_cache_pid" 2>/dev/null; then
                 echo "⏳ Building music library metadata cache..."
             fi
-            local _cache_status=0
             wait "$_cache_pid" || _cache_status=$?
             _cache_pid=""
-            command rm -f "$cachefile".tmp.*(N) 2>/dev/null
             if (( _cache_status != 0 )); then
                 echo "⚠️  Library metadata refresh failed; using the existing cache."
             fi
         fi
+    }
 
-        _fzf_sort_dir=$(mktemp -d /tmp/jukebox-sort-XXXXXX)
-        local sort_state_file="/tmp/jukebox-sort-state-$$"
+    _jukebox_setup_fzf_sort() {
+        _jukebox_wait_cache
+        _fzf_sort_dir=$(mktemp -d "$_jukebox_runtime/sort.XXXXXXXX")
+        local sort_state_file="$_jukebox_runtime/sort-state"
         _gen_sort() {
             cat > "$_fzf_sort_dir/$2.sh" << SORTEOF
 #!/usr/bin/env bash
 echo "$2" > "$sort_state_file"
 if (( \$_JUKEBOX_SHOW_FORMATNAMES )); then
-    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s - %s\\n", \$1, \$2, \$3 }'
+    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{
+        if (\$4 != "" && \$4 != "Unknown")
+            printf "%s\\t%s - %s  [%s]\\n", \$1, \$2, \$3, \$4
+        else
+            printf "%s\\t%s - %s\\n", \$1, \$2, \$3
+    }'
 else
     $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s\\n", \$1, \$1 }'
 fi
@@ -502,7 +444,12 @@ SORTEOF
     _jukebox_get_input_list() {
         if [[ -s "$cachefile" ]]; then
             if (( _jukebox_show_formatnames )); then
-                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{ printf "%s\t%s - %s\n", $1, $2, $3 }'
+                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{
+                    if ($4 != "" && $4 != "Unknown")
+                        printf "%s\t%s - %s  [%s]\n", $1, $2, $3, $4
+                    else
+                        printf "%s\t%s - %s\n", $1, $2, $3
+                }'
             else
                 sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{ printf "%s\t%s\n", $1, $1 }'
             fi
@@ -526,18 +473,8 @@ SORTEOF
                 *) cut -f1 "$cachefile" ;;
             esac
         else
-            setopt localoptions extendedglob nocaseglob
-            local _raw_files=()
-            case "$order" in
-                name_asc)  _raw_files=("$musicdir"/**/*.(flac|mp3)(N.on)) ;;
-                name_desc) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.On)) ;;
-                date_asc)  _raw_files=("$musicdir"/**/*.(flac|mp3)(N.Om)) ;;
-                date_desc) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.om)) ;;
-                *) _raw_files=("$musicdir"/**/*.(flac|mp3)(N.)) ;;
-            esac
-            for f in "${_raw_files[@]}"; do
-                printf '%s\n' "$f"
-            done
+            "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/library.py" list \
+                "$musicdir" "$cachefile" --order "$order"
         fi
     }
 
@@ -568,6 +505,9 @@ SORTEOF
         read "choice?Choose [1-8, q]: "
     fi
 
+    # Wait in the parent shell: a command-substitution subshell cannot reap
+    # the scanner. All playback modes then see one consistent library.
+    [[ "$choice" == [1-8] ]] && _jukebox_wait_cache
     case "$choice" in
         0|r|R)
             if (( ! _resume_available )); then
@@ -623,10 +563,11 @@ SORTEOF
             # (Because _jukebox_get_input_list sorts by title from cache)
             local visual_paths
             visual_paths=$(echo "$input_list" | cut -f1)
-            echo "default" > "/tmp/jukebox-sort-state-$$"
+            all_files=("${(@f)visual_paths}")
+            echo "default" > "$_jukebox_runtime/sort-state"
             local output
             output=$(echo "$input_list" | \
-                fzf -i --multi \
+                _jukebox_fzf -i --multi \
                     --delimiter=$'\t' --with-nth=2 \
                     --prompt="Pick start song(s): " \
                     --header="$fzf_header" \
@@ -651,7 +592,7 @@ SORTEOF
             
             # Reconstruct the true visual order if the user changed the sort
             local current_sort
-            current_sort=$(cat "/tmp/jukebox-sort-state-$$" 2>/dev/null)
+            current_sort=$(cat "$_jukebox_runtime/sort-state" 2>/dev/null)
             if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
                 # Re-run the exact sort script to get the ordered file list
                 local sorted_paths
@@ -726,7 +667,7 @@ SORTEOF
 
             local selected
             selected=$(echo "$input_list" | \
-                fzf -i --multi \
+                _jukebox_fzf -i --multi \
                     --delimiter=$'\t' --with-nth=2 \
                     --prompt="Queue: " \
                     --header="$fzf_header" \
@@ -801,13 +742,11 @@ SORTEOF
         # Remove session-specific temp files (persistent cache is kept!)
         command rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
         [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
-        command rm -f "/tmp/jukebox-sort-state-$$"
+        command rm -f "$_jukebox_runtime/sort-state"
         command rm -rf "$_fzf_sort_dir"
-        # Remove log files that accumulate across sessions
-        command rm -f /tmp/jukebox-py.log /tmp/jukebox-debug.log 2>/dev/null
         # Unset exported env vars so they don't leak into the next session
         unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
-              _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE 2>/dev/null
+              _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE _JUKEBOX_RUNTIME 2>/dev/null
         unfunction _jukebox_render _jukebox_render_next_panel _jukebox_ipc \
                    _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_cache_next_art _jukebox_calc_layout \
@@ -815,12 +754,13 @@ SORTEOF
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
                    _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
-                   _jukebox_log _jukebox_setup_fzf_sort \
+                   _jukebox_log _jukebox_setup_fzf_sort _jukebox_wait_cache \
                    _jukebox_stop_startup_jobs \
                    _jukebox_save_state _jukebox_load_state _jukebox_snapshot_playlist \
-                   _jukebox_resume_label _jukebox_apply_resume 2>/dev/null
+                   _jukebox_resume_label _jukebox_apply_resume _jukebox_cycle_repeat _jukebox_show_help \
+                   _jukebox_theme_init _jukebox_fzf _jukebox_control_row _jukebox_text_line _jukebox_status_line _jukebox_progress_line 2>/dev/null
     }
-    trap _jukebox_cleanup INT TERM HUP QUIT PIPE EXIT
+    _jukebox_player_started=1
 
     # start mpv in background with IPC socket, fully headless
     _jukebox_log "mpv: starting with playlist=$playlist sock=$mpvsock start_idx=$start_idx"
@@ -831,7 +771,8 @@ SORTEOF
     # the HDD is touched once per track instead of continuously.
     local -a _mpv_auth_args=()
     if [[ "$_jukebox_source" == "jellyfin" ]]; then
-        mpv_auth_config=$(mktemp /tmp/jukebox-mpv-auth-XXXXXX.conf)
+        mpv_auth_config="$_jukebox_runtime/mpv-auth.conf"
+        : > "$mpv_auth_config"
         chmod 600 "$mpv_auth_config"
         if ! "$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" mpv-config "$mpv_auth_config"; then
             return 1
@@ -842,12 +783,13 @@ SORTEOF
     # before a single sample of the track's beginning is heard.
     local -a _mpv_resume_args=()
     (( _jukebox_resuming )) && _mpv_resume_args=(--pause=yes)
-    env PIPEWIRE_LATENCY="50/1000" mpv --no-video --no-terminal \
+    env PIPEWIRE_LATENCY="50/1000" "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/process.py" mpv --no-video --no-terminal \
         "${_mpv_auth_args[@]}" "${_mpv_resume_args[@]}" \
         --ytdl=no \
         --audio-format=s32 \
         --audio-samplerate=0 \
         --keep-open=no \
+        --loop-file=no --loop-playlist=no \
         --cache=yes \
         --cache-secs=3600 \
         --demuxer-max-bytes=512MiB \
@@ -863,7 +805,7 @@ SORTEOF
 
     # wait for socket
     local waited=0
-    while [[ ! -S "$mpvsock" ]] && (( waited < 30 )); do
+    while [[ ! -S "$mpvsock" ]] && (( waited < 30 )) && kill -0 "$_jukebox_mpv_pid" 2>/dev/null; do
         sleep 0.1
         waited=$((waited + 1))
     done
@@ -877,63 +819,6 @@ SORTEOF
     # around for the whole session would only widen its exposure window.
     [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
 
-    # --- IPC helper using python for reliable Unix socket communication ---
-
-
-
-
-    # --- batch property getter: single Python process, single socket connection ---
-    # Usage: _jukebox_batch_get prop1 prop2 ...
-    # Output: tab-separated values for each property
-
-
-    # --- extract cover art ---
-
-
-    # --- layout engine: computes all dimensions from terminal size ---
-    # Sets: _layout_mode (normal|compact|minimal)
-    #       _layout_header_rows, _layout_art_start_row
-    #       _layout_art_w, _layout_art_h
-    #       _layout_next_mode (side|below|hidden)
-    #       _layout_next_art_w, _layout_next_art_h
-    #       _layout_next_x, _layout_next_y (for side mode)
-    #       _layout_content_bottom (last row available before progress bar)
-
-
-    # --- cache chafa output for current cover using layout dimensions ---
-
-
-    # --- cache chafa output for "Up Next" cover using layout dimensions ---
-
-
-    # center helper
-
-
-    # pad line to full width (clears leftover chars)
-
-
-    # query an individual property fast using python batch fetcher wrapper
-
-
-    # --- fetch metadata for the next track (called from main loop, NOT render) ---
-
-
-
-
-    # --- render "Up Next" panel at given position (helper for _jukebox_render) ---
-    # Args: $1=start_col, $2=start_row, $3=max_row (must not render past this), $4=max_col_width
-
-
-    # --- render screen (pure display — all data pre-fetched by main loop) ---
-
-
-
-    # --- add to queue (Spotify style / play next) ---
-
-
-    # --- queue picker & editor ---
-
-
     # enter altscreen + initial clear
     printf '\e[?1049h\e[2J\e[?25l'
 
@@ -942,6 +827,7 @@ SORTEOF
     local _render_pl_pos=0 _render_pl_count=0
     local _render_time_pos=0 _render_duration=0 _render_paused=""
     local _render_speed=1.0 _render_pitch=1.0 _render_apc="true"
+    local _render_volume="" _render_mute="false" _repeat_mode="off"
     local _source_title="" _source_artist="" _source_album=""
     local _current_meta="" _cm_date="" _cm_dur="" _cm_track="" _cm_disc=""
     local _lyrics_mode=0 _lyrics_loaded_path="" _lyrics_active_index=0 _lyrics_previous_index=0
@@ -960,7 +846,7 @@ SORTEOF
         _retries=$((_retries + 1))
     done
     if [[ -n "$_render_path" ]]; then
-        if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+        if [[ -r "$cachefile" ]]; then
             _current_meta=$("$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" cache-row --cache "$cachefile" "$_render_path" 2>/dev/null)
             IFS=$'\x1f' read -r _source_title _source_artist _source_album _cm_date _cm_dur _cm_track _cm_disc <<< "$_current_meta"
             [[ -z "$_render_title" ]] && _render_title="$_source_title"
@@ -997,6 +883,10 @@ SORTEOF
     # main display loop
     local _tick=0 key="" seq="" _drain="" new_cols new_rows _est_next _poll_batch pos dur pos_i dur_i pos_m pos_s dur_m dur_s time_str icon label bar_w bar filled empty
     local _p_path _p_paused _p_count _p_pos _p_time _p_dur _p_title _p_artist _p_album _p_next_file _p_next_id _p_speed _p_pitch _p_apc
+    local _p_volume _p_mute _p_loop_file _p_loop_queue _p_repeat
+    local cmd prompt_row prompt_col ans
+    local _info_basename _info_dir _info_stream _i_codec _i_codec_long _i_sr _i_bits _i_ch _i_sr_khz _i_ch_label
+    local _info_fmt _i_dur _i_bitrate _i_fsize _i_dur_i _i_br_kbps _i_stat_size _i_size_str _i_date _i_genre _i_tn
     local _rt_mode="tempo"
     (( _jukebox_resuming )) && [[ -n "$_resume_rtmode" ]] && _rt_mode="$_resume_rtmode"
 
@@ -1005,6 +895,11 @@ SORTEOF
         key=""
         if read -rs -t 0.01 -k 1 key 2>/dev/null; then
             case "$key" in
+                '+'|'=') _jukebox_set '{"command":["add","volume",5]}' ;;
+                '-') _jukebox_set '{"command":["add","volume",-5]}' ;;
+                'm'|'M') _jukebox_set '{"command":["cycle","mute"]}' ;;
+                't'|'T') _jukebox_cycle_repeat ;;
+                '?') _jukebox_show_help ;;
                 ' ')  _jukebox_set '{"command":["cycle","pause"]}' ;;
                 ',')  _jukebox_set '{"command":["playlist-prev"]}' ;;
                 '<')  _jukebox_set '{"command":["playlist-prev"]}' ;;
@@ -1066,7 +961,7 @@ SORTEOF
                     if (( _nav_offset == 0 )); then
                         _jukebox_set '{"command":["set_property","pause",false]}'
                     else
-                        local cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((_render_pl_pos + 1 + _nav_offset))")
+                        cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "playlist-pos", int(sys.argv[1])]}))' "$((_render_pl_pos + 1 + _nav_offset))")
                         _jukebox_set "$cmd"
                         _nav_offset=0
                         _jukebox_last_next_file=""
@@ -1112,7 +1007,7 @@ SORTEOF
                         echo "║  ℹ️  Music Source Info                                    ║"
                         echo "╚════════════════════════════════════════════════════════════╝"
                         echo ""
-                        if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+                        if [[ -r "$cachefile" ]]; then
                             echo "  🌐 Source:   Jellyfin direct stream"
                             echo "  🎵 Title:    ${_render_title:-Unknown}"
                             echo "  🎤 Artist:   ${_render_artist:-Unknown}"
@@ -1132,13 +1027,13 @@ SORTEOF
                             continue
                         fi
                         # File path
-                        local _info_basename="${_render_path##*/}"
-                        local _info_dir="${_render_path%/*}"
+                        _info_basename="${_render_path##*/}"
+                        _info_dir="${_render_path%/*}"
                         echo "  📄 File:    $_info_basename"
                         echo "  📁 Path:    $_info_dir"
                         echo ""
                         # Stream info via ffprobe (sample rate, bit depth, channels, codec)
-                        local _info_stream
+                        _info_stream
                         _info_stream=$(ffprobe -v quiet -select_streams a:0 \
                             -show_entries stream=sample_rate,bits_per_sample,channels,codec_name,codec_long_name \
                             -of csv=p=0 -- "$_render_path" 2>/dev/null)
@@ -1146,7 +1041,7 @@ SORTEOF
                             IFS=',' read -r _i_codec _i_codec_long _i_sr _i_bits _i_ch <<< "$_info_stream"
                             echo "  🎵 Codec:       ${_i_codec_long:-$_i_codec}"
                             if [[ -n "$_i_sr" && "$_i_sr" != "N/A" ]]; then
-                                local _i_sr_khz
+                                _i_sr_khz
                                 if (( _i_sr % 1000 == 0 )); then
                                     _i_sr_khz="$((_i_sr / 1000)) kHz"
                                 else
@@ -1158,7 +1053,7 @@ SORTEOF
                                 echo "  🔢 Bit Depth:   ${_i_bits}-bit"
                             fi
                             if [[ -n "$_i_ch" && "$_i_ch" != "N/A" ]]; then
-                                local _i_ch_label
+                                _i_ch_label
                                 case "$_i_ch" in
                                     1) _i_ch_label="Mono" ;;
                                     2) _i_ch_label="Stereo" ;;
@@ -1169,26 +1064,26 @@ SORTEOF
                         fi
                         echo ""
                         # Format-level info (duration, bitrate, size)
-                        local _info_fmt
+                        _info_fmt
                         _info_fmt=$(ffprobe -v quiet \
                             -show_entries format=duration,bit_rate,size \
                             -of csv=p=0 -- "$_render_path" 2>/dev/null)
                         if [[ -n "$_info_fmt" ]]; then
                             IFS=',' read -r _i_dur _i_bitrate _i_fsize <<< "$_info_fmt"
                             if [[ -n "$_i_dur" && "$_i_dur" != "N/A" ]]; then
-                                local _i_dur_i=${_i_dur%.*}
+                                _i_dur_i=${_i_dur%.*}
                                 echo "  ⏱️  Duration:   $(printf "%d:%02d" $((_i_dur_i / 60)) $((_i_dur_i % 60)))"
                             fi
                             if [[ -n "$_i_bitrate" && "$_i_bitrate" != "N/A" ]]; then
-                                local _i_br_kbps=$((_i_bitrate / 1000))
+                                _i_br_kbps=$((_i_bitrate / 1000))
                                 echo "  📈 Bitrate:     ${_i_br_kbps} kbps ($(awk "BEGIN{printf \"%.1f\", $_i_bitrate/1000000}") Mbps)"
                             fi
                         fi
                         # File size from stat (more reliable)
-                        local _i_stat_size
+                        _i_stat_size
                         _i_stat_size=$(stat -c %s "$_render_path" 2>/dev/null)
                         if [[ -n "$_i_stat_size" && "$_i_stat_size" != "0" ]]; then
-                            local _i_size_str
+                            _i_size_str
                             if (( _i_stat_size >= 1073741824 )); then
                                 _i_size_str="$(awk "BEGIN{printf \"%.2f GB\", $_i_stat_size/1073741824}")"
                             elif (( _i_stat_size >= 1048576 )); then
@@ -1204,7 +1099,7 @@ SORTEOF
                         [[ -n "$_render_title" ]]  && echo "  Title:   $_render_title"
                         [[ -n "$_render_artist" ]] && echo "  Artist:  $_render_artist"
                         [[ -n "$_render_album" ]]  && echo "  Album:   $_render_album"
-                        local _i_date _i_genre _i_tn
+                        _i_date _i_genre _i_tn
                         _i_date=$(ffprobe -v quiet -show_entries format_tags=date -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
                         _i_genre=$(ffprobe -v quiet -show_entries format_tags=genre -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
                         _i_tn=$(ffprobe -v quiet -show_entries format_tags=track -of default=nw=1:nk=1 -- "$_render_path" 2>/dev/null)
@@ -1220,11 +1115,11 @@ SORTEOF
                     force_redraw=1
                     ;;
                 'q'|'Q')
-                    local prompt_row=$((_layout_rows / 2))
-                    local prompt_col=$(( (_layout_cols - 38) / 2 ))
+                    prompt_row=$((_layout_rows / 2))
+                    prompt_col=$(( (_layout_cols - 38) / 2 ))
                     (( prompt_col < 1 )) && prompt_col=1
                     printf '\e[%d;%dH\e[1;41;37m Are you sure you want to quit? (y/N) \e[0m' "$prompt_row" "$prompt_col"
-                    local ans=""
+                    ans=""
                     while true; do
                         read -rs -t 0.1 -k 1 ans 2>/dev/null
                         if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
@@ -1270,11 +1165,21 @@ SORTEOF
         _poll_batch=$(_jukebox_batch_get path pause playlist-count playlist-pos \
             time-pos duration metadata/by-key/title metadata/by-key/artist \
             metadata/by-key/album "playlist/$_est_next/filename" "playlist/$_est_next/id" \
-            speed pitch audio-pitch-correction)
+            speed pitch audio-pitch-correction volume mute loop-file loop-playlist)
             
         IFS=$'\x1f' read -r _p_path _p_paused _p_count _p_pos _p_time _p_dur \
             _p_title _p_artist _p_album _p_next_file _p_next_id \
-            _p_speed _p_pitch _p_apc <<< "$_poll_batch"
+            _p_speed _p_pitch _p_apc _p_volume _p_mute _p_loop_file _p_loop_queue <<< "$_poll_batch"
+
+        _p_repeat="off"
+        [[ "$_p_loop_queue" == "inf" ]] && _p_repeat="queue"
+        [[ "$_p_loop_file" == "inf" ]] && _p_repeat="track"
+        if [[ "$_render_volume" != "$_p_volume" || "$_render_mute" != "$_p_mute" || "$_repeat_mode" != "$_p_repeat" ]]; then
+            force_redraw=1
+        fi
+        _render_volume="$_p_volume"
+        _render_mute="${_p_mute:-false}"
+        _repeat_mode="$_p_repeat"
 
         # Update shared render state
         _render_path="$_p_path"
@@ -1286,9 +1191,6 @@ SORTEOF
         _render_title="$_p_title"
         _render_artist="$_p_artist"
         _render_album="$_p_album"
-        [[ -z "$_render_title" ]] && _render_title="$_source_title"
-        [[ -z "$_render_artist" ]] && _render_artist="$_source_artist"
-        [[ -z "$_render_album" ]] && _render_album="$_source_album"
         _render_speed="$_p_speed"
         _render_pitch="$_p_pitch"
         _render_apc="$_p_apc"
@@ -1297,7 +1199,7 @@ SORTEOF
         if [[ -n "$_render_path" && "$_render_path" != "$last_path" ]]; then
             last_path="$_render_path"
             _source_title=""; _source_artist=""; _source_album=""
-            if [[ "$_render_path" == http://* || "$_render_path" == https://* ]]; then
+            if [[ -r "$cachefile" ]]; then
                 _current_meta=$("$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" cache-row --cache "$cachefile" "$_render_path" 2>/dev/null)
                 IFS=$'\x1f' read -r _source_title _source_artist _source_album _cm_date _cm_dur _cm_track _cm_disc <<< "$_current_meta"
                 [[ -z "$_render_title" ]] && _render_title="$_source_title"
@@ -1320,8 +1222,13 @@ SORTEOF
             force_redraw=1
         fi
 
+        [[ -z "$_render_title" ]] && _render_title="$_source_title"
+        [[ -z "$_render_artist" ]] && _render_artist="$_source_artist"
+        [[ -z "$_render_album" ]] && _render_album="$_source_album"
+
         if [[ "$_render_paused" != "$last_paused" ]]; then
             last_paused="$_render_paused"
+            force_redraw=1
         fi
 
         # 4b. Persist playback position (~every 2s) — the snapshot a
@@ -1359,38 +1266,11 @@ SORTEOF
             _jukebox_render
             force_redraw=0
         else
-            # Partial: update only progress bar (no IPC — data already fetched above)
-            pos="${_render_time_pos}"
-            dur="${_render_duration}"
-            if [[ -n "$pos" && -n "$dur" && "$dur" != "0" ]]; then
-                pos_i=${pos%.*} 
-                dur_i=${dur%.*}
-                pos_i=${pos_i:-0}
-                dur_i=${dur_i:-0}
-                pos_m=$((pos_i / 60)) 
-                pos_s=$((pos_i % 60))
-                dur_m=$((dur_i / 60)) 
-                dur_s=$((dur_i % 60))
-                time_str=$(printf "%02d:%02d / %02d:%02d" $pos_m $pos_s $dur_m $dur_s)
+            # Partial redraw uses the same colors/width calculation as a full frame.
+            printf '\e[?7l\e7\e[%d;1H' "$last_rows"
+            _jukebox_progress_line "$last_cols"
+            printf '\e8\e[?7h'
 
-                icon="▶"
-                [[ "$_render_paused" == "true" ]] && icon="⏸"
-
-                label="$icon $time_str"
-                bar_w=$((last_cols - ${#label} - 4))
-                bar=""
-                if (( bar_w > 10 && dur_i > 0 )); then
-                    filled=$((pos_i * bar_w / dur_i))
-                    (( filled > bar_w )) && filled=$bar_w
-                    empty=$((bar_w - filled))
-                    bar=" [$(printf '━%.0s' {1..$filled} 2>/dev/null)$(printf '─%.0s' {1..$empty} 2>/dev/null)]"
-                fi
-
-                # Draw ONLY the bottom line
-                printf '\e[?7l\e7\e[%d;1H' "$last_rows"
-                _jukebox_padline "$(_jukebox_center "${label}${bar}" $last_cols)" $last_cols
-                printf '\e8\e[?7h'
-            fi
         fi
 
         fi  # end of _tick % 5 == 0 || force_redraw
@@ -1399,6 +1279,16 @@ SORTEOF
         sleep 0.05
     done
     _jukebox_cleanup
+    } always {
+        if (( _jukebox_player_started )); then
+            _jukebox_cleanup
+        elif (( _jukebox_startup_ready )); then
+            _jukebox_stop_startup_jobs
+        fi
+        [[ -n "$_jukebox_runtime" ]] && command rm -rf -- "$_jukebox_runtime"
+        [[ -n "$_jukebox_lockfd" ]] && zsystem flock -u "$_jukebox_lockfd" 2>/dev/null
+        unset _JUKEBOX_RUNTIME
+    }
 }
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -1429,12 +1319,28 @@ nightcore() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --speed|-s)
+                if (( $# < 2 )); then
+                    print -u2 -- "Missing value for $1 (try nightcore --help)"
+                    return 1
+                fi
                 _nc_speed="$2"; shift 2 ;;
             --gain|-g)
+                if (( $# < 2 )); then
+                    print -u2 -- "Missing value for $1 (try nightcore --help)"
+                    return 1
+                fi
                 _nc_gain="$2"; shift 2 ;;
             --output|-o)
+                if (( $# < 2 )); then
+                    print -u2 -- "Missing value for $1 (try nightcore --help)"
+                    return 1
+                fi
                 _nc_output="$2"; shift 2 ;;
             --suffix)
+                if (( $# < 2 )); then
+                    print -u2 -- "Missing value for $1 (try nightcore --help)"
+                    return 1
+                fi
                 _nc_suffix="$2"; shift 2 ;;
             --preview|-p)
                 _nc_preview=1; shift ;;

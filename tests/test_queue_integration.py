@@ -5,13 +5,20 @@ import json
 import os
 import tempfile
 import pytest
+import shutil
 
 
 @pytest.fixture
 def mpv_instance():
-    sock = tempfile.mktemp(suffix=".sock", prefix="test-mpv-")
+    if not shutil.which("mpv"):
+        pytest.skip("mpv is not installed")
+    runtime = tempfile.TemporaryDirectory(prefix="test-mpv-")
+    sock = os.path.join(runtime.name, "mpv.sock")
     p = subprocess.Popen([
         "mpv",
+        "--no-config",
+        "--load-scripts=no",
+        "--ao=null",
         f"--input-ipc-server={sock}",
         "--no-video",
         "--no-terminal",
@@ -33,11 +40,13 @@ def mpv_instance():
         p.wait(timeout=2)
     except subprocess.TimeoutExpired:
         p.kill()
+        p.wait(timeout=2)
     if os.path.exists(sock):
         try:
             os.unlink(sock)
         except OSError:
             pass
+    runtime.cleanup()
 
 
 def send_ipc(sock_path, cmd_dict):

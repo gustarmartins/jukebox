@@ -68,7 +68,7 @@ try:
                     elif isinstance(val, bool):
                         results[rid] = "true" if val else "false"
                     else:
-                        results[rid] = str(val)
+                        results[rid] = "".join(" " if ord(c) < 32 or 127 <= ord(c) <= 159 else c for c in str(val))
                     needed.discard(rid)
             except:
                 pass
@@ -82,7 +82,7 @@ except Exception as e:
     # Output empty separators so the caller gets the right number of fields
     print("\x1f".join(["" for _ in sys.argv[2:]]))
     print(f"Exception: {e}", file=sys.stderr)
-' "$mpvsock" "$@" 2>>/tmp/jukebox-py.log
+' "$mpvsock" "$@" 2>>"$_jukebox_runtime/ipc.log"
     }
 
     _jukebox_fast_get() {

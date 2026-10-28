@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """fzf preview script for Jukebox — shows album art + comprehensive metadata."""
-import subprocess, json, os, sys
+import subprocess, json, os, sys, re
 
 def run(cmd, strip=True, **kw):
     try:
@@ -72,29 +72,37 @@ def main():
         except json.JSONDecodeError:
             pass
 
-    # Jellyfin metadata is already cached during the single API sync.  Reading
-    # it here avoids downloading/probing the audio stream for every fzf move.
-    if is_remote:
-        cache_path = os.environ.get("_JUKEBOX_CACHE", "")
+    # Load metadata from cache if available (works for both Jellyfin remote
+    # streams and local tracks like osu! songs where tags come from beatmap files).
+    cache_path = os.environ.get("_JUKEBOX_CACHE", "")
+    cached_meta = {}
+    if cache_path:
         try:
             with open(cache_path, encoding="utf-8") as cache:
                 for line in cache:
                     fields = line.rstrip("\n").split("\t")
                     if len(fields) >= 8 and fields[0] == filepath:
-                        data = {
-                            "format": {
-                                "duration": fields[5],
-                                "tags": {
-                                    "title": fields[1], "artist": fields[2],
-                                    "album": fields[3], "date": fields[4],
-                                    "track": fields[6], "disc": fields[7],
-                                },
-                            },
-                            "streams": [],
+                        cached_meta = {
+                            "title": fields[1],
+                            "artist": fields[2],
+                            "album": fields[3],
+                            "date": fields[4],
+                            "duration": fields[5],
+                            "track": fields[6],
+                            "disc": fields[7],
                         }
                         break
         except OSError:
             pass
+
+    if is_remote and cached_meta:
+        data = {
+            "format": {
+                "duration": cached_meta.get("duration", "0"),
+                "tags": cached_meta,
+            },
+            "streams": [],
+        }
 
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
     tags = fmt.get("tags") if isinstance(fmt.get("tags"), dict) else {}
@@ -113,14 +121,19 @@ def main():
 
     # --- Basic metadata ---
     fname = os.path.splitext(os.path.basename(filepath))[0]
-    title = tag("title") or fname
-    artist = tag("artist") or ""
-    album = tag("album") or ""
+    raw_title = tag("title")
+    cached_title = cached_meta.get("title", "")
+    if (not raw_title or raw_title.lower() == "audio") and cached_title and cached_title.lower() != "audio":
+        title = cached_title
+    else:
+        title = raw_title or cached_title or fname
+    artist = tag("artist") or cached_meta.get("artist") or ""
+    album = tag("album") or cached_meta.get("album") or ""
     album_artist = tag("album_artist") or tag("albumartist") or ""
-    date = tag("date") or tag("year") or tag("DATE") or ""
+    date = tag("date") or tag("year") or tag("DATE") or cached_meta.get("date") or ""
     genre = tag("genre") or ""
-    track = tag("track") or tag("tracknumber") or ""
-    disc = tag("disc") or tag("discnumber") or ""
+    track = tag("track") or tag("tracknumber") or cached_meta.get("track") or ""
+    disc = tag("disc") or tag("discnumber") or cached_meta.get("disc") or ""
     comment = tag("comment") or ""
     isrc = tag("ISRC") or tag("isrc") or ""
     encoder = tag("encoder") or ""
@@ -174,6 +187,7 @@ def main():
     header_lines_count = [0]
 
     def printline(s):
+        s = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", s)
         if len(s) > cols:
             s = s[:cols - 3] + "..."
         print(s)
@@ -235,6 +249,16 @@ def main():
                     ["ffmpeg", "-y", "-v", "quiet", "-i", filepath,
                      "-an", "-vcodec", "mjpeg", "-frames:v", "1", tmpcover],
                     timeout=10, capture_output=True)
+                if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
+                    folder = os.path.dirname(filepath)
+                    if os.path.isdir(folder):
+                        import shutil
+                        for img_name in sorted(os.listdir(folder)):
+                            if img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                                img_path = os.path.join(folder, img_name)
+                                if os.path.isfile(img_path) and os.path.getsize(img_path) > 0:
+                                    shutil.copy(img_path, tmpcover)
+                                    break
             if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
                 script_dir = os.environ.get("_JUKEBOX_SCRIPT_DIR", "")
                 fallback = os.path.join(script_dir, "assets", "NO-COVER.png")

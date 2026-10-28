@@ -1,6 +1,6 @@
 # Jukebox
 
-Terminal music player with local FLAC and first-class Jellyfin streaming, Kitty
+Terminal music player with local audio and first-class Jellyfin streaming, Kitty
 graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 
 > [!IMPORTANT]
@@ -14,7 +14,10 @@ graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 - File browsing & search via `fzf`
 - Spotify-style "Play Next" dynamic queueing
 - Interactive Queue Editor (Jump to tracks, delete from queue)
-- Headless `mpv` rendering via Unix Socket IPC with fast-polling (`socat`)
+- Headless `mpv` playback through Python Unix socket IPC
+- Volume, mute, repeat-track/repeat-queue controls, and in-player help (`?`)
+- Incremental local indexing with live refresh for edited, added, and removed tracks
+- Crash-safe resume, private runtime files, and protection against conflicting launches
 - `chafa` integration for high-quality Kitty terminal graphics over album art
 - Jellyfin library browsing and direct streaming over LAN or Tailscale
 - Local sidecar/embedded lyrics and Jellyfin synchronized lyrics (`Y`)
@@ -24,8 +27,7 @@ graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 - `fzf`: Core interactive menu frontend.
 - `chafa`: Converts MP3/FLAC album art to Kitty pixel-perfect images.
 - `ffmpeg` / `ffprobe`: Used strictly to grab tags & art instantly.
-- `socat` & `jq`: Powers real-time polling to MPV's IPC.
-- `python`: Runs the Jellyfin client and fast MPV IPC helpers.
+- `python3` and `zsh`: Run the library indexer, Jellyfin client, and player.
 
 ## Install
 
@@ -76,3 +78,30 @@ Use the desktop's `100.x.y.z` Tailscale address instead when MagicDNS is not
 enabled. The per-user access token is stored in
 `~/.config/jukebox/jellyfin.json` with mode `0600` and is never written into a
 playlist URL.
+
+
+## What is new
+
+Local playback now supports FLAC, MP3, Ogg, Opus, M4A, AAC, WAV, AIFF,
+ALAC, APE, and WavPack. During playback, use `+`/`-` for volume, `M` to mute,
+`T` to cycle repeat off/track/queue, and `?` for all controls. Volume, mute,
+and repeat are restored when resuming a session.
+
+Run `jukebox doctor` to check dependencies or `jukebox --help` for commands.
+The [complete player guide](jukebox/README.md) covers setup and key bindings.
+See the [code audit and researched roadmap](docs/AUDIT_AND_IDEAS.md) for this
+refresh and future ideas.
+
+## Development
+
+Install pytest and the player dependencies, then run:
+
+```sh
+python3 -m pytest -q
+for script in jukebox/jukebox.zsh jukebox/src/*.zsh; do zsh -n "$script"; done
+bash -n packaging/arch/PKGBUILD
+```
+
+Tests use temporary libraries and silent mpv output (`--ao=null`), with personal
+mpv configuration and scripts disabled. Pytest only collects `tests/`, so local
+makepkg copies do not interfere. GitHub Actions runs the same checks.

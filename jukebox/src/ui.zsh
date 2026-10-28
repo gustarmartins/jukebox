@@ -147,7 +147,7 @@
         (( q_y > max_y )) && return
 
         local centered_title="$(_jukebox_center "$_title_label" $max_w)"
-        printf '\e[%d;%dH\e[1m%s\e[0m' "$q_y" "$nx" "$centered_title"
+        printf '\e[%d;%dH%s%s%s' "$q_y" "$nx" "$_ui_accent" "$centered_title" "$_ui_reset"
         q_y=$((q_y + 1))
 
         if [[ -n "$_jukebox_last_next_file" ]]; then
@@ -178,11 +178,16 @@
             [[ -n "$_jukebox_next_dur" ]] && _meta_lines+=("⏱️ $_jukebox_next_dur")
             [[ -n "$_jukebox_next_quality" ]] && _meta_lines+=("$_jukebox_next_quality")
 
+            local meta_index=0 meta_style
             for ml in "${_meta_lines[@]}"; do
+                meta_index=$((meta_index + 1))
+                meta_style="$_ui_secondary"
+                (( meta_index == 1 )) && meta_style="$_ui_title"
+                (( meta_index == 2 )) && meta_style="$_ui_text"
                 (( q_y > max_y )) && break
                 (( ${#ml} > max_len )) && ml="${ml[1,$((max_len - 2))]}.."
                 local centered_ml="$(_jukebox_center "$ml" $max_w)"
-                printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$nx" "$centered_ml"
+                printf '\e[%d;%dH%s%s%s' "$q_y" "$nx" "$meta_style" "$centered_ml" "$_ui_reset"
                 q_y=$((q_y + 1))
             done
         else
@@ -192,7 +197,7 @@
                 local status_msg="⏳ Loading..."
                 (( next_idx >= _render_pl_count )) && status_msg="End of playlist"
                 local centered_status="$(_jukebox_center "$status_msg" $max_w)"
-                printf '\e[%d;%dH\e[2m%s\e[0m' "$q_y" "$nx" "$centered_status"
+                printf '\e[%d;%dH%s%s%s' "$q_y" "$nx" "$_ui_secondary" "$centered_status" "$_ui_reset"
             }
         fi
     }
@@ -204,7 +209,7 @@
         [[ -z "$_render_path" ]] && return
 
         local title="${_render_title}"
-        [[ -z "$title" ]] && title="${_render_path##*/}" && title="${title%.flac}"
+        [[ -z "$title" ]] && title="${_render_path##*/}" && title="${title:r}"
         local artist="${_render_artist:-Unknown Artist}"
         local album="${_render_album:-Unknown Album}"
         local pl_pos=${_render_pl_pos:-0}
@@ -212,25 +217,6 @@
         local pos=${_render_time_pos:-0}
         local dur=${_render_duration:-0}
         local paused="$_render_paused"
-
-        local pos_i=${pos%.*} dur_i=${dur%.*}
-        pos_i=${pos_i:-0}; dur_i=${dur_i:-0}
-        local pos_m=$((pos_i / 60)) pos_s=$((pos_i % 60))
-        local dur_m=$((dur_i / 60)) dur_s=$((dur_i % 60))
-        local time_str=$(printf "%02d:%02d / %02d:%02d" $pos_m $pos_s $dur_m $dur_s)
-
-        local icon="▶"
-        [[ "$paused" == "true" ]] && icon="⏸"
-
-        local label="$icon $time_str"
-        local bar_w=$((cols - ${#label} - 4))
-        local bar=""
-        if (( bar_w > 8 && dur_i > 0 )); then
-            local filled=$((pos_i * bar_w / dur_i))
-            (( filled > bar_w )) && filled=$bar_w
-            local empty=$((bar_w - filled))
-            bar=" [$(printf '━%.0s' {1..$filled} 2>/dev/null)$(printf '─%.0s' {1..$empty} 2>/dev/null)]"
-        fi
 
         local speed="${_render_speed:-1.000000}"
         local pitch="${_render_pitch:-1.000000}"
@@ -257,7 +243,10 @@
             fi
         fi
 
-        local track_info="[$((pl_pos + 1)) / $pl_count]"
+        local volume_label="${_render_volume%.*}%"
+        [[ -z "$_render_volume" ]] && volume_label="—"
+        [[ "$_render_mute" == "true" ]] && volume_label="muted"
+        local track_info="[$((pl_pos + 1)) / $pl_count]  Vol $volume_label  Repeat ${_repeat_mode:-off}"
 
         # Begin synchronized terminal output (Kitty / iTerm double-buffering)
         printf '\e[?2026h'
@@ -268,41 +257,44 @@
         # Disable auto-wrap, clear screen, hide cursor
         printf '\e[?7l\e[2J\e[?25l'
 
-        # --- Adaptive Header ---
-        # Title, Artist, Album are ALWAYS rendered & centered regardless of layout mode.
-        if [[ "$_layout_mode" == "normal" ]]; then
-            # Full header (5 rows): Controls1, Controls2, Title+Artist, Album, Track
-            local controls1="SPACE=pause  ←→=seek  ↑↓=seek 30s  ,./<>=prev/next  [/]=adj  P=mode:${rt_mode}"
-            local controls2="A=add next  L=queue  S=shuffle  N=new queue  Y=lyrics  j/k=nav  i=info  q=quit"
-            printf '\e[1;1H\e[2m'
-            _jukebox_padline "$(_jukebox_center "$controls1" $cols)" $cols
+        # Group shortcuts into spaced keycaps; enabled controls use a filled
+        # accent. A single palette keeps contrast without competing colors.
+        local pause_label="Pause" pause_active=0 mute_label="Mute" mute_active=0 repeat_active=0 fx_active=0
+        [[ "$_render_paused" == true ]] && { pause_label="Resume"; pause_active=1; }
+        [[ "$_render_mute" == true ]] && { mute_label="Muted"; mute_active=1; }
+        [[ "${_repeat_mode:-off}" != off ]] && repeat_active=1
+        [[ "$rt_mode" != tempo ]] && fx_active=1
+        local -a controls1=("SPACE|$pause_label|$pause_active" ',/.|Skip|0' '←→|Seek|0' '↑↓|Seek 30s|0'
+            '-/+|Volume|0' "M|$mute_label|$mute_active" "T|Repeat: ${_repeat_mode:-off}|$repeat_active" "P|$rt_mode|$fx_active")
+        local -a controls2=('A|Play next|0' 'L|Queue|0' 'S|Shuffle|0' 'N|New queue|0'
+            "Y|Lyrics|${_lyrics_mode:-0}" 'I|Track info|0' '?|Help|0' 'Q|Quit|0')
+        if (( cols < 100 )); then
+            controls1=("SPACE|$pause_label|$pause_active" ',/.|Skip|0' '-/+|Volume|0' "M|$mute_label|$mute_active" "T|Repeat|$repeat_active")
+            controls2=('A|Next|0' 'L|Queue|0' 'S|Shuffle|0' "Y|Lyrics|${_lyrics_mode:-0}" '?|Help|0' 'Q|Quit|0')
+        fi
+        if [[ "$_layout_mode" == normal ]]; then
+            printf '\e[1;1H'
+            _jukebox_control_row "$cols" "${controls1[@]}"
             printf '\e[2;1H'
-            _jukebox_padline "$(_jukebox_center "$controls2" $cols)" $cols
-            printf '\e[0m'
+            _jukebox_control_row "$cols" "${controls2[@]}"
             printf '\e[3;1H'
-            _jukebox_padline "$(_jukebox_center "♫  $title  —  $artist  $fx_str" $cols)" $cols
+            _jukebox_text_line "$cols" "$_ui_title" "♫  $title  —  $artist  $fx_str"
             printf '\e[4;1H'
-            _jukebox_padline "$(_jukebox_center "💿  $album" $cols)" $cols
+            _jukebox_text_line "$cols" "$_ui_secondary" "💿  $album"
             printf '\e[5;1H'
-            _jukebox_padline "$(_jukebox_center "$track_info" $cols)" $cols
-
-        elif [[ "$_layout_mode" == "compact" ]]; then
-            # Compact header (3 rows): Controls, Title+Artist+Track, Album
-            local controls_compact="A=add  L=que  S=shuf  N=new  Y=lyr  j/k=nav  i=info  P=mode:${rt_mode}  q=quit"
-            printf '\e[1;1H\e[2m'
-            _jukebox_padline "$(_jukebox_center "$controls_compact" $cols)" $cols
-            printf '\e[0m'
-            printf '\e[2;1H\e[1m'
-            _jukebox_padline "$(_jukebox_center "♫  $title  —  $artist  $track_info" $cols)" $cols
-            printf '\e[0m\e[3;1H'
-            _jukebox_padline "$(_jukebox_center "💿  $album" $cols)" $cols
-
+            _jukebox_status_line "$cols"
+        elif [[ "$_layout_mode" == compact ]]; then
+            printf '\e[1;1H'
+            _jukebox_control_row "$cols" "SPACE|$pause_label|$pause_active" '-/+|Volume|0' "M|$mute_label|$mute_active" "T|Repeat|$repeat_active" 'L|Queue|0' '?|Help|0' 'Q|Quit|0'
+            printf '\e[2;1H'
+            _jukebox_text_line "$cols" "$_ui_title" "♫  $title  —  $artist"
+            printf '\e[3;1H'
+            _jukebox_text_line "$cols" "$_ui_accent" "$album  ·  $track_info"
         else
-            # Minimal header (2 rows): Title+Artist, Album+Track
-            printf '\e[1;1H\e[1m'
-            _jukebox_padline "$(_jukebox_center "♫  $title  —  $artist" $cols)" $cols
-            printf '\e[0m\e[2;1H'
-            _jukebox_padline "$(_jukebox_center "💿  $album  $track_info" $cols)" $cols
+            printf '\e[1;1H'
+            _jukebox_text_line "$cols" "$_ui_title" "♫  $title  —  $artist"
+            printf '\e[2;1H'
+            _jukebox_text_line "$cols" "$_ui_accent" "$album  ·  $track_info"
         fi
 
         if (( _lyrics_mode )); then
@@ -329,7 +321,7 @@
 
         # --- Progress bar (Centered at bottom row) ---
         printf '\e[%d;1H' "$rows"
-        _jukebox_padline "$(_jukebox_center "${label}${bar}" $cols)" $cols
+        _jukebox_progress_line "$cols"
 
         # Restore auto-wrap, end sync
         printf '\e[?7h\e[?2026l'

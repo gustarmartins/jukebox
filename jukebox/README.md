@@ -1,6 +1,6 @@
 # 🎵 Jukebox
 
-A terminal-based music player for zsh. Browse local FLAC/MP3 files or a Jellyfin
+A terminal-based music player for zsh. Browse local audio files or a Jellyfin
 music library, build custom queues, see album art and synchronized lyrics in
 the terminal, and control playback without leaving the command line.
 
@@ -11,7 +11,8 @@ the terminal, and control playback without leaving the command line.
 - **Fuzzy browsing** — preview songs with metadata + album art before playing (via [fzf](https://github.com/junegunn/fzf))
 - **Queue builder** — TAB to pick songs, Ctrl-A to select all, build your own playlist
 - **Live queue picker** — press `L` during playback to see the queue and jump to any track
-- **Keyboard controls** — seek, skip, speed up/down, all from the keyboard
+- **Keyboard controls** — seek, skip, volume, mute, repeat, speed/pitch, and help (`?`)
+- **Incremental indexing** — refresh edited files, retry failed probes, and track live library changes
 - **Jellyfin streaming** — browse and direct-stream a server over LAN or Tailscale
 - **Lyrics** — `.lrc`, `.elrc`, `.txt`, embedded tags, and Jellyfin lyrics
 
@@ -24,25 +25,24 @@ the terminal, and control playback without leaving the command line.
 | [fzf](https://github.com/junegunn/fzf) | Fuzzy finder for browsing & queue |
 | [ffmpeg](https://ffmpeg.org/) | Extracts album art + metadata |
 | [chafa](https://hpjansson.org/chafa/) | Renders album art as text in the terminal |
-| [socat](http://www.dest-unreach.org/socat/) | IPC communication with mpv |
-| [jq](https://jqlang.github.io/jq/) | Parses JSON responses from mpv |
-| [bc](https://www.gnu.org/software/bc/) | Duration formatting |
+| Python 3.10+ | Library indexing, Jellyfin, lyrics, and JSON IPC |
+| inotify-tools (optional) | Live local library refresh |
 
 ### Install dependencies
 
 **Arch Linux:**
 ```bash
-sudo pacman -S zsh mpv fzf ffmpeg chafa socat jq bc
+sudo pacman -S zsh mpv fzf ffmpeg chafa python
 ```
 
 **Ubuntu / Debian:**
 ```bash
-sudo apt install zsh mpv fzf ffmpeg chafa socat jq bc
+sudo apt install zsh mpv fzf ffmpeg chafa python3
 ```
 
 **Fedora:**
 ```bash
-sudo dnf install zsh mpv fzf ffmpeg chafa socat jq bc
+sudo dnf install zsh mpv fzf ffmpeg chafa python3
 ```
 
 ## Setup
@@ -58,7 +58,7 @@ sudo dnf install zsh mpv fzf ffmpeg chafa socat jq bc
    source ~/jukebox/jukebox.zsh
    ```
 
-3. **Run `jukebox` once** and choose the folder containing your FLAC files.
+3. **Run `jukebox` once** and choose the folder containing your music files.
 
 4. **Reload your shell:**
    ```bash
@@ -96,7 +96,9 @@ Jukebox keeps its metadata cache and saved sessions in `~/.jukebox-app/`:
 
 | File | What |
 |------|------|
-| `metadata.tsv` / `metadata-jellyfin.tsv` | Persistent, incremental library metadata cache |
+| `metadata.tsv` / `metadata-jellyfin.tsv` | Persistent library metadata |
+| `metadata.tsv.files.json` | Local file size/mtime fingerprints for incremental refresh |
+| `player-local.lock` / `player-jellyfin.lock` | Prevent conflicting session writers |
 | `session.state` / `session-jellyfin.state` | Last playback position (see [Resuming a session](#resuming-a-session)) |
 | `session.m3u` / `session-jellyfin.m3u` | The queue that belongs to that session |
 
@@ -164,6 +166,21 @@ beside the track and then falls back to embedded `LYRICS`/`UNSYNCEDLYRICS` tags.
 For Jellyfin, it uses the server's lyrics endpoint. Jellyfin recognizes the
 same sidecar naming convention, for example `Song.flac` with `Song.lrc`.
 
+### Appearance
+
+Playback shortcuts use spaced keycaps with pale cyan accents and bright action
+labels. Enabled pause, mute, repeat, and lyrics controls use a filled keycap;
+titles, metadata, and progress use the same restrained palette. Library and
+queue selections share the accent. Narrow windows condense the shortcut row,
+and `?` always provides the full list of controls.
+
+Tracks without artwork use a transparent vinyl record in the player, Up Next,
+and browsing previews, including shuffle mode. See the [asset notes](assets/README.md).
+
+Colors respect `NO_COLOR`. Set `JUKEBOX_COLOR=1` to explicitly enable the
+palette, or `JUKEBOX_COLOR=0` to use monochrome keycaps and labels. These settings
+apply within Jukebox and do not change your terminal theme.
+
 ## Usage
 
 Run `jukebox` and pick a mode:
@@ -194,7 +211,7 @@ resumable session behind.
 On the next launch, option `0` appears at the top of the menu. Picking it
 restores the whole queue (including anything added with `A` or reordered in the
 queue picker), jumps to the track you were on, seeks back to the exact second,
-and restores speed/pitch/lyrics-view state. Playback starts paused internally
+and restores speed, pitch, lyrics view, volume, mute, and repeat state. Playback starts paused internally
 so you never hear the beginning of the track before the seek lands.
 
 Sessions are tracked per source — a local session and a Jellyfin session are
@@ -206,6 +223,10 @@ offered. Option `x` deletes the saved session.
 | Key | Action |
 |-----|--------|
 | `SPACE` | Pause / resume |
+| `+` / `=` / `-` | Raise / lower mpv volume by 5% |
+| `M` | Mute / unmute |
+| `T` | Cycle repeat: off → current track → whole queue |
+| `?` | Show all playback controls |
 | `←` / `→` | Seek ±5 seconds |
 | `↑` / `↓` | Seek ±30 seconds |
 | `,` / `.` | Previous / next track |
@@ -247,14 +268,41 @@ Press `L` during playback to open the live queue manager:
 
 ## Notes
 
-- **Linux only** — uses GNU `find -printf` for date sorting. Not compatible with macOS.
-- **Local mode supports FLAC and MP3** — Jellyfin mode supports the audio formats exposed by the server.
+- **Linux only** — uses Zsh file locks, Unix sockets, and Linux parent-death signals.
+- **Local formats:** FLAC, MP3, Ogg, Opus, M4A, AAC, WAV, AIFF (`.aif`/`.aiff`), ALAC, APE, WavPack. Jellyfin exposes the formats available on its server.
 - Album art is extracted from embedded metadata (most files have it).
 
-### Known Limits
-Because Jukebox runs natively in Zsh without a heavy backend, it is subject to certain shell and OS-level limits when scanning massive libraries:
-- **The Patience Limit (~3,000 to 5,000 files)**: Jukebox spawns an `ffprobe` subprocess for every file to build the metadata cache for sorting and fzf previews. Extracting metadata for 5,000 files takes roughly 50-100 seconds sequentially. It won't crash, but startup for the `Browse` or `Queue` menus will be noticeably slow.
-- **The OS `ARG_MAX` Limit (~30,000 to 40,000 files)**: Jukebox expands glob patterns directly in the shell (e.g., `**/*.flac`). If a library contains tens of thousands of files, the resulting string of absolute file paths will exceed the Linux kernel's `ARG_MAX` limit (typically ~2MB), causing the shell to crash with a `zsh: argument list too long` error before Jukebox can even start.
+### Library refresh and diagnostics
+
+`jukebox doctor` reports required tools and the configured source/folders;
+`jukebox --help` lists commands without starting playback. If inotify-tools is
+installed, changes to existing watched folders update metadata under a cache
+lock, including edits and deletions. Newly created nested folders or changes
+missed by the watcher are reconciled on the next launch.
+
+The first scan probes at most four tracks concurrently; later scans only probe
+new or changed files (size and nanosecond mtime). Failed probes keep previous
+metadata and are retried. Cache writes are atomic. Vorbis/Opus stream tags,
+mixed-case tags, and disc/track numbers are supported.
+
+A second instance using the same data directory and source exits with an
+explanation. It does not terminate your current player. Each launch keeps its
+socket, artwork, generated scripts, and logs in its own private runtime folder.
+Normal exits, menu cancellation, and handled signals clean up that folder. The
+mpv child receives SIGTERM if its launching shell dies; SIGKILL can still leave
+small runtime/cache temporary files until OS cleanup.
+
+### Known limits
+
+- Metadata still requires one ffprobe per new/edited file. A cold import of a
+  large collection can take time, especially on a mechanical disk.
+- TSV browsing and line-based playlists cannot faithfully represent filenames
+  containing tabs, carriage returns, newlines, or the internal unit separator;
+  the local scanner skips those files. Spaces and apostrophes work normally.
+- The shell keeps queues and browse lists in memory. There is no fixed file-count
+  limit, but this is not yet a paginated database-backed library browser.
+- Jellyfin calls and artwork extraction still run synchronously on track changes;
+  a slow server can delay input. See the [audit](../docs/AUDIT_AND_IDEAS.md).
 
 ## License
 

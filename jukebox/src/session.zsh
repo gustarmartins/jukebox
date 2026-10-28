@@ -62,6 +62,9 @@ except Exception: pass
             print -r -- "apc=${_render_apc:-true}"
             print -r -- "rtmode=${_rt_mode:-tempo}"
             print -r -- "lyrics=${_lyrics_mode:-0}"
+            [[ -n "$_render_volume" ]] && print -r -- "volume=$_render_volume"
+            print -r -- "mute=${_render_mute:-false}"
+            print -r -- "repeat=${_repeat_mode:-off}"
             print -r -- "path=$_render_path"
             print -r -- "title=$_render_title"
             print -r -- "artist=$_render_artist"
@@ -79,6 +82,7 @@ except Exception: pass
         _resume_source=""; _resume_ended=""; _resume_pos=0; _resume_count=0
         _resume_time=0; _resume_duration=0; _resume_speed="1.0"; _resume_pitch="1.0"
         _resume_apc="true"; _resume_rtmode="tempo"; _resume_lyrics=0
+        _resume_volume=""; _resume_mute="false"; _resume_repeat="off"
         _resume_path=""; _resume_title=""; _resume_artist=""; _resume_album=""
 
         [[ -s "$_jukebox_state_file" && -s "$_jukebox_state_playlist" ]] || return 1
@@ -100,6 +104,9 @@ except Exception: pass
                 apc)      _resume_apc="$val" ;;
                 rtmode)   _resume_rtmode="$val" ;;
                 lyrics)   _resume_lyrics="$val" ;;
+                volume)   _resume_volume="$val" ;;
+                mute)     _resume_mute="$val" ;;
+                repeat)   _resume_repeat="$val" ;;
                 path)     _resume_path="$val" ;;
                 title)    _resume_title="$val" ;;
                 artist)   _resume_artist="$val" ;;
@@ -111,11 +118,21 @@ except Exception: pass
         [[ -n "$_resume_path" ]] || return 1
         # Sanitize anything used in arithmetic — a truncated write (power loss
         # mid-save is exactly what this feature exists for) must not blow up.
-        [[ "$_resume_pos" == <-> ]] || _resume_pos=0
-        [[ "$_resume_count" == <-> ]] || _resume_count=0
-        [[ "$_resume_lyrics" == <-> ]] || _resume_lyrics=0
-        [[ "${_resume_time%.*}" == <-> ]] || _resume_time=0
-        [[ "${_resume_duration%.*}" == <-> ]] || _resume_duration=0
+        [[ "$_resume_pos" =~ '^[0-9]{1,9}$' ]] || _resume_pos=0
+        [[ "$_resume_count" =~ '^[0-9]{1,9}$' ]] || _resume_count=0
+        [[ "$_resume_lyrics" == [01] ]] || _resume_lyrics=0
+        [[ "$_resume_time" =~ '^[0-9]{1,9}([.][0-9]{1,6})?$' ]] || _resume_time=0
+        [[ "$_resume_duration" =~ '^[0-9]{1,9}([.][0-9]{1,6})?$' ]] || _resume_duration=0
+        [[ "$_resume_speed" =~ '^[0-9]{1,3}([.][0-9]{1,6})?$' ]] || _resume_speed=1.0
+        [[ "$_resume_pitch" =~ '^[0-9]{1,3}([.][0-9]{1,6})?$' ]] || _resume_pitch=1.0
+        (( _resume_speed >= 0.01 && _resume_speed <= 100 )) || _resume_speed=1.0
+        (( _resume_pitch >= 0.01 && _resume_pitch <= 100 )) || _resume_pitch=1.0
+        [[ "$_resume_volume" =~ '^[0-9]{1,4}([.][0-9]{1,6})?$' ]] || _resume_volume=""
+        [[ -n "$_resume_volume" ]] && { (( _resume_volume <= 1000 )) || _resume_volume=""; }
+        [[ "$_resume_apc" == true || "$_resume_apc" == false ]] || _resume_apc=true
+        [[ "$_resume_mute" == true || "$_resume_mute" == false ]] || _resume_mute=false
+        case "$_resume_rtmode" in tempo|nightcore|pitch) ;; *) _resume_rtmode=tempo ;; esac
+        case "$_resume_repeat" in off|track|queue) ;; *) _resume_repeat=off ;; esac
         return 0
     }
 
@@ -140,8 +157,7 @@ except Exception: pass
     # Restore playback position and audio settings once mpv has the track
     # loaded. mpv was started paused, so the seek lands before any audio.
     _jukebox_apply_resume() {
-        local t=${_resume_time%.*}
-        if (( t > 0 )); then
+        if (( _resume_time > 0 )); then
             local cmd
             cmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["seek", float(sys.argv[1]), "absolute"]}))' "$_resume_time" 2>/dev/null)
             [[ -n "$cmd" ]] && _jukebox_set "$cmd"
@@ -159,6 +175,19 @@ except Exception: pass
         if [[ "$_resume_apc" == "false" ]]; then
             _jukebox_set '{"command":["set_property","audio-pitch-correction",false]}'
         fi
+        if [[ -n "$_resume_volume" ]]; then
+            local vcmd
+            vcmd=$("$_JUKEBOX_PYTHON" -c 'import sys, json; print(json.dumps({"command": ["set_property", "volume", float(sys.argv[1])]}))' "$_resume_volume" 2>/dev/null)
+            [[ -n "$vcmd" ]] && _jukebox_set "$vcmd"
+            _render_volume=$_resume_volume
+        fi
+        _jukebox_set "{\"command\":[\"set_property\",\"mute\",$_resume_mute]}"
+        _render_mute=$_resume_mute
+        _repeat_mode=$_resume_repeat
+        case "$_repeat_mode" in
+            track) _jukebox_set '{"command":["set_property","loop-file","inf"]}' ;;
+            queue) _jukebox_set '{"command":["set_property","loop-playlist","inf"]}' ;;
+        esac
         (( _lyrics_mode )) && _jukebox_load_lyrics "$_render_path"
         # Hand control back to the user: playback starts where it left off.
         _jukebox_set '{"command":["set_property","pause",false]}'
