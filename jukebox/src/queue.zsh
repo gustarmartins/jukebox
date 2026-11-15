@@ -9,8 +9,8 @@
 
         if [[ -s "$cachefile" ]]; then
             fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L  (Shift+Alt+N = All tracks) ──────────"
         fi
 
         # default list: setup using shared helper
@@ -186,19 +186,45 @@ except Exception:
         printf '\e[?1049l\e[?25h'
         [[ -n "$saved_stty" ]] && stty "$saved_stty" 2>/dev/null
 
-        echo ""
-        echo "🎵 Redo Queue / Select Mode:"
-        echo "  1) Browse & pick (plays from selection onward, Alt-s to shuffle rest)"
-        echo "  2) Build queue (TAB to pick multiple, ENTER to play)"
-        echo "  3) Shuffle entire library"
-        echo "  4) Play all (A-Z)"
-        echo "  5) Play all (by Date - newest first)"
-        echo "  6) Play all (Original order)"
-        echo "  q) Cancel (keep current playback)"
-        echo ""
+        local rchoice _redo_nc_label=""
+        while true; do
+            if (( _jukebox_nightcore_only )); then
+                _redo_nc_label="🌙 ON (Nightcore Mix + osu! Nightcore only)"
+            else
+                _redo_nc_label="OFF (all tracks)"
+            fi
+            echo ""
+            echo "🎵 Redo Queue / Select Mode:"
+            echo "  1) Browse & pick (plays from selection onward, Alt-s to shuffle rest)"
+            echo "  2) Build queue (TAB to pick multiple, ENTER to play)"
+            echo "  3) Shuffle library"
+            echo "  4) Play all (A-Z)"
+            echo "  5) Play all (by Date - newest first)"
+            echo "  6) Play all (Original order)"
+            echo "  7) 🌙 Shuffle Nightcore only"
+            echo "  8) 🌙 Browse & pick Nightcore only"
+            echo "  n) 🌙 Nightcore-only filter: $_redo_nc_label"
+            echo "  q) Cancel (keep current playback)"
+            echo ""
 
-        local rchoice
-        read "rchoice?Choose [1-6, q]: "
+            read "rchoice?Choose [1-8, n, q]: "
+            if [[ "$rchoice" == [nN] ]]; then
+                _jukebox_nightcore_only=$(( 1 - _jukebox_nightcore_only ))
+                export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
+                continue
+            fi
+            break
+        done
+
+        if [[ "$rchoice" == "7" ]]; then
+            _jukebox_nightcore_only=1
+            export _JUKEBOX_NIGHTCORE_ONLY=1
+            rchoice=3
+        elif [[ "$rchoice" == "8" ]]; then
+            _jukebox_nightcore_only=1
+            export _JUKEBOX_NIGHTCORE_ONLY=1
+            rchoice=1
+        fi
 
         local new_files=()
         case "$rchoice" in
@@ -218,8 +244,8 @@ except Exception:
                 local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
                 if [[ -s "$cachefile" ]]; then
                     fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L  (Shift+Alt+N = All tracks) ──────────"
                 fi
 
                 local input_list
@@ -260,11 +286,20 @@ except Exception:
                     return
                 fi
 
+                local fzf_nc_state
+                fzf_nc_state=$(cat "$_jukebox_runtime/nightcore-only" 2>/dev/null)
+                if [[ "$fzf_nc_state" == [01] && "$fzf_nc_state" != "$_jukebox_nightcore_only" ]]; then
+                    _jukebox_nightcore_only=$fzf_nc_state
+                    export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
+                fi
+
                 local current_sort
                 current_sort=$(cat "$_jukebox_runtime/sort-state" 2>/dev/null)
-                if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
+                if [[ -s "$cachefile" ]] && { [[ -n "$current_sort" && "$current_sort" != "default" ]] || [[ -n "$fzf_nc_state" ]]; }; then
+                    local _sort_script="${current_sort:-by_title}"
+                    [[ "$_sort_script" == "default" ]] && _sort_script="by_title"
                     local sorted_paths
-                    sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
+                    sorted_paths=$("$_fzf_sort_dir/$_sort_script.sh" | cut -f1)
                     all_files=("${(@f)sorted_paths}")
                 fi
                 command rm -rf "$_fzf_sort_dir"
@@ -316,8 +351,8 @@ except Exception:
                 local fzf_header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play"
                 if [[ -s "$cachefile" ]]; then
                     fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L  (Shift+Alt+N = All tracks) ──────────"
                 fi
 
                 local input_list

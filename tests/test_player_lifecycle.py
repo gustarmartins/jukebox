@@ -75,7 +75,7 @@ def test_terminal_controls_session_and_concurrent_launch(tmp_path):
             return {}
 
     try:
-        wait_for(lambda: b"Choose [1-8, q]" in output)
+        wait_for(lambda: b"Choose [1-9, n, q]" in output)
         os.write(master, b"1\n")
         wait_for(lambda: bool(state().get("path")))
         # A second launch must fail without touching this player's live socket.

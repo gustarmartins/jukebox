@@ -130,6 +130,7 @@ jukebox() {
     local _jukebox_debug=0
     local _jukebox_debuglog=""
     local _jukebox_show_formatnames=1
+    local _jukebox_nightcore_only=0
     local _jukebox_source="${JUKEBOX_SOURCE:l}"
 
     # Connection management intentionally runs before any player temp files or
@@ -138,11 +139,12 @@ jukebox() {
         --help|-h|help)
             cat <<'HELPEOF'
 Jukebox — terminal music player
-Usage: jukebox [--debug] [--show-filenames|--show-formatnames]
+Usage: jukebox [--debug] [--nightcore|-n|--all] [--show-filenames|--show-formatnames]
        jukebox setup | doctor | jellyfin-login SERVER | jellyfin-status | jellyfin-logout
 
 Local audio: FLAC, MP3, Ogg, Opus, M4A, AAC, WAV, AIFF, ALAC, APE, WavPack.
 Set JUKEBOX_SOURCE=local (default) or jellyfin.
+Use --nightcore (-n) to filter playback/browsing to Nightcore tracks only.
 Playback: Space pause; ,/. previous/next; arrows seek; +/- volume; M mute;
           T repeat off/track/queue; A add next; L queue; S shuffle; N new queue;
           Y lyrics; [/] speed/pitch; P effect mode; R reset; ? help; Q quit.
@@ -197,6 +199,14 @@ HELPEOF
         case "$1" in
             --debug|-d)
                 _jukebox_debug=1
+                shift
+                ;;
+            --nightcore|--nightcore-only|-n)
+                _jukebox_nightcore_only=1
+                shift
+                ;;
+            --all)
+                _jukebox_nightcore_only=0
                 shift
                 ;;
             --show-filenames)
@@ -292,11 +302,12 @@ HELPEOF
     local _resume_source="" _resume_ended="" _resume_pos=0 _resume_count=0
     local _resume_time=0 _resume_duration=0 _resume_speed="1.0" _resume_pitch="1.0"
     local _resume_apc="true" _resume_rtmode="tempo" _resume_lyrics=0
-    local _resume_volume="" _resume_mute="false" _resume_repeat="off"
+    local _resume_volume="" _resume_mute="false" _resume_repeat="off" _resume_nightcore_only=0
     local _resume_path="" _resume_title="" _resume_artist="" _resume_album=""
     export _JUKEBOX_PREVTMP="$_jukebox_prevtmp"
     export _JUKEBOX_CACHE="$cachefile"
     export _JUKEBOX_SHOW_FORMATNAMES="$_jukebox_show_formatnames"
+    export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
 
     local _ui_reset _ui_text _ui_secondary _ui_accent _ui_title _ui_key _ui_key_active
 
@@ -391,19 +402,27 @@ HELPEOF
         _jukebox_wait_cache
         _fzf_sort_dir=$(mktemp -d "$_jukebox_runtime/sort.XXXXXXXX")
         local sort_state_file="$_jukebox_runtime/sort-state"
+        local nc_state_file="$_jukebox_runtime/nightcore-only"
+        echo "${_jukebox_nightcore_only:-0}" > "$nc_state_file"
         _gen_sort() {
             cat > "$_fzf_sort_dir/$2.sh" << SORTEOF
 #!/usr/bin/env bash
 echo "$2" > "$sort_state_file"
+nc_flag="\${_JUKEBOX_NIGHTCORE_ONLY:-0}"
+[[ -r "$nc_state_file" ]] && nc_flag=\$(cat "$nc_state_file" 2>/dev/null)
 if (( \$_JUKEBOX_SHOW_FORMATNAMES )); then
-    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{
-        if (\$4 != "" && \$4 != "Unknown")
-            printf "%s\\t%s - %s  [%s]\\n", \$1, \$2, \$3, \$4
-        else
-            printf "%s\\t%s - %s\\n", \$1, \$2, \$3
-    }'
+    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' -v nc="\$nc_flag" '
+        nc == "1" && \$4 != "Nightcore Mix" && \$4 !~ /^osu!/ && tolower(\$1 "\\t" \$2 "\\t" \$3 "\\t" \$4) !~ /nightcore|nightstep|speed[[:space:]]*up|sped[[:space:]]*up|spdup|chincore|bakaricore|zcore/ { next }
+        {
+            if (\$4 != "" && \$4 != "Unknown")
+                printf "%s\\t%s - %s  [%s]\\n", \$1, \$2, \$3, \$4
+            else
+                printf "%s\\t%s - %s\\n", \$1, \$2, \$3
+        }'
 else
-    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' '{ printf "%s\\t%s\\n", \$1, \$1 }'
+    $1 "\$_JUKEBOX_CACHE" | awk -F'\\t' -v nc="\$nc_flag" '
+        nc == "1" && \$4 != "Nightcore Mix" && \$4 !~ /^osu!/ && tolower(\$1 "\\t" \$2 "\\t" \$3 "\\t" \$4) !~ /nightcore|nightstep|speed[[:space:]]*up|sped[[:space:]]*up|spdup|chincore|bakaricore|zcore/ { next }
+        { printf "%s\\t%s\\n", \$1, \$1 }'
 fi
 SORTEOF
         }
@@ -422,6 +441,21 @@ SORTEOF
         _gen_sort "sort -t$'\t' -k5,5n $_ADT" "by_date_rev"
         _gen_sort "sort -t$'\t' -k6,6n -k3,3f $_ADT" "by_length"
         _gen_sort "sort -t$'\t' -k6,6nr -k3,3f $_ADT" "by_length_rev"
+
+        cat > "$_fzf_sort_dir/nightcore_only.sh" << NCEOF
+#!/usr/bin/env bash
+echo "1" > "$nc_state_file"
+cur=\$(cat "$sort_state_file" 2>/dev/null)
+[[ -z "\$cur" || "\$cur" == "default" ]] && cur="by_title"
+exec "$_fzf_sort_dir/\$cur.sh"
+NCEOF
+        cat > "$_fzf_sort_dir/all_tracks.sh" << ALLEOF
+#!/usr/bin/env bash
+echo "0" > "$nc_state_file"
+cur=\$(cat "$sort_state_file" 2>/dev/null)
+[[ -z "\$cur" || "\$cur" == "default" ]] && cur="by_title"
+exec "$_fzf_sort_dir/\$cur.sh"
+ALLEOF
         chmod +x "$_fzf_sort_dir"/*.sh
 
         _fzf_binds=()
@@ -437,6 +471,8 @@ SORTEOF
                 --bind "alt-D:reload($_fzf_sort_dir/by_date_rev.sh)"
                 --bind "alt-l:reload($_fzf_sort_dir/by_length.sh)"
                 --bind "alt-L:reload($_fzf_sort_dir/by_length_rev.sh)"
+                --bind "alt-n:reload($_fzf_sort_dir/nightcore_only.sh)"
+                --bind "alt-N:reload($_fzf_sort_dir/all_tracks.sh)"
             )
         fi
     }
@@ -444,14 +480,18 @@ SORTEOF
     _jukebox_get_input_list() {
         if [[ -s "$cachefile" ]]; then
             if (( _jukebox_show_formatnames )); then
-                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{
-                    if ($4 != "" && $4 != "Unknown")
-                        printf "%s\t%s - %s  [%s]\n", $1, $2, $3, $4
-                    else
-                        printf "%s\t%s - %s\n", $1, $2, $3
-                }'
+                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" '
+                    nc == "1" && $4 != "Nightcore Mix" && $4 !~ /^osu!/ && tolower($1 "\t" $2 "\t" $3 "\t" $4) !~ /nightcore|nightstep|speed[[:space:]]*up|sped[[:space:]]*up|spdup|chincore|bakaricore|zcore/ { next }
+                    {
+                        if ($4 != "" && $4 != "Unknown")
+                            printf "%s\t%s - %s  [%s]\n", $1, $2, $3, $4
+                        else
+                            printf "%s\t%s - %s\n", $1, $2, $3
+                    }'
             else
-                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' '{ printf "%s\t%s\n", $1, $1 }'
+                sort -t$'\t' -k2 -f "$cachefile" | awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" '
+                    nc == "1" && $4 != "Nightcore Mix" && $4 !~ /^osu!/ && tolower($1 "\t" $2 "\t" $3 "\t" $4) !~ /nightcore|nightstep|speed[[:space:]]*up|sped[[:space:]]*up|spdup|chincore|bakaricore|zcore/ { next }
+                    { printf "%s\t%s\n", $1, $1 }'
             fi
         else
             if (( _jukebox_show_formatnames )); then
@@ -464,17 +504,20 @@ SORTEOF
 
     _jukebox_source_files() {
         local order="${1:-original}"
+        local -a _nc_args=()
+        (( _jukebox_nightcore_only )) && _nc_args=(--nightcore-only)
         if [[ "$_jukebox_source" == "jellyfin" ]]; then
+            local _jf_filter='nc == "1" && $4 != "Nightcore Mix" && $4 !~ /^osu!/ && tolower($1 "\t" $2 "\t" $3 "\t" $4) !~ /nightcore|nightstep|speed[[:space:]]*up|sped[[:space:]]*up|spdup|chincore|bakaricore|zcore/ { next } { print }'
             case "$order" in
-                name_asc)  sort -t$'\t' -k2,2f "$cachefile" | cut -f1 ;;
-                name_desc) sort -t$'\t' -k2,2fr "$cachefile" | cut -f1 ;;
-                date_asc)  sort -t$'\t' -k5,5n -k4,4f -k8,8n -k7,7n "$cachefile" | cut -f1 ;;
-                date_desc) sort -t$'\t' -k5,5nr -k4,4f -k8,8n -k7,7n "$cachefile" | cut -f1 ;;
-                *) cut -f1 "$cachefile" ;;
+                name_asc)  awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" "$_jf_filter" "$cachefile" | sort -t$'\t' -k2,2f | cut -f1 ;;
+                name_desc) awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" "$_jf_filter" "$cachefile" | sort -t$'\t' -k2,2fr | cut -f1 ;;
+                date_asc)  awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" "$_jf_filter" "$cachefile" | sort -t$'\t' -k5,5n -k4,4f -k8,8n -k7,7n | cut -f1 ;;
+                date_desc) awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" "$_jf_filter" "$cachefile" | sort -t$'\t' -k5,5nr -k4,4f -k8,8n -k7,7n | cut -f1 ;;
+                *) awk -F'\t' -v nc="${_jukebox_nightcore_only:-0}" "$_jf_filter" "$cachefile" | cut -f1 ;;
             esac
         else
             "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/library.py" list \
-                "$musicdir" "$cachefile" --order "$order"
+                "$musicdir" "$cachefile" --order "$order" "${_nc_args[@]}"
         fi
     }
 
@@ -484,30 +527,47 @@ SORTEOF
     local _resume_available=0
     _jukebox_load_state && _resume_available=1
 
-    echo "🎵 Jukebox - Select playback mode:"
-    if (( _resume_available )); then
-        echo "  0) ▶ Resume: $(_jukebox_resume_label)"
-    fi
-    echo "  1) Play all (original order)"
-    echo "  2) Sort by filename (A-Z)"
-    echo "  3) Sort by filename (Z-A)"
-    echo "  4) Sort by date (oldest first)"
-    echo "  5) Sort by date (newest first)"
-    echo "  6) Browse & pick (plays from selection onward)"
-    echo "  7) Shuffle"
-    echo "  8) Build queue (TAB to pick, ENTER to play)"
-    (( _resume_available )) && echo "  x) Forget saved session"
-    echo "  q) Quit"
-    echo ""
-    if (( _resume_available )); then
-        read "choice?Choose [0-8, x, q]: "
-    else
-        read "choice?Choose [1-8, q]: "
-    fi
+    local _nc_label=""
+    while true; do
+        if (( _jukebox_nightcore_only )); then
+            _nc_label="🌙 ON (Nightcore Mix + osu! Nightcore only)"
+        else
+            _nc_label="OFF (all tracks)"
+        fi
+        echo "🎵 Jukebox - Select playback mode:"
+        if (( _resume_available )); then
+            echo "  0) ▶ Resume: $(_jukebox_resume_label)"
+        fi
+        echo "  1) Play all (original order)"
+        echo "  2) Sort by filename (A-Z)"
+        echo "  3) Sort by filename (Z-A)"
+        echo "  4) Sort by date (oldest first)"
+        echo "  5) Sort by date (newest first)"
+        echo "  6) Browse & pick (plays from selection onward)"
+        echo "  7) Shuffle"
+        echo "  8) Build queue (TAB to pick, ENTER to play)"
+        echo "  9) 🌙 Play Nightcore only (shuffle)"
+        echo "  n) 🌙 Nightcore-only filter: $_nc_label"
+        (( _resume_available )) && echo "  x) Forget saved session"
+        echo "  q) Quit"
+        echo ""
+        if (( _resume_available )); then
+            read "choice?Choose [0-9, n, x, q]: "
+        else
+            read "choice?Choose [1-9, n, q]: "
+        fi
+        if [[ "$choice" == [nN] ]]; then
+            _jukebox_nightcore_only=$(( 1 - _jukebox_nightcore_only ))
+            export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
+            echo ""
+            continue
+        fi
+        break
+    done
 
     # Wait in the parent shell: a command-substitution subshell cannot reap
     # the scanner. All playback modes then see one consistent library.
-    [[ "$choice" == [1-8] ]] && _jukebox_wait_cache
+    [[ "$choice" == [1-9] ]] && _jukebox_wait_cache
     case "$choice" in
         0|r|R)
             if (( ! _resume_available )); then
@@ -525,6 +585,8 @@ SORTEOF
             start_idx=$_resume_pos
             (( start_idx >= ${#files[@]} )) && start_idx=0
             _jukebox_resuming=1
+            _jukebox_nightcore_only=${_resume_nightcore_only:-0}
+            export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
             ;;
         x|X)
             if (( _resume_available )); then
@@ -552,8 +614,8 @@ SORTEOF
             local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L  (Shift+Alt+N = All tracks) ──────────"
             fi
 
             local input_list
@@ -590,13 +652,22 @@ SORTEOF
                 return
             fi
             
-            # Reconstruct the true visual order if the user changed the sort
+            # Sync Nightcore-only toggle if changed inside fzf (Alt-n / Alt-N)
+            local fzf_nc_state
+            fzf_nc_state=$(cat "$_jukebox_runtime/nightcore-only" 2>/dev/null)
+            if [[ "$fzf_nc_state" == [01] && "$fzf_nc_state" != "$_jukebox_nightcore_only" ]]; then
+                _jukebox_nightcore_only=$fzf_nc_state
+                export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
+            fi
+
+            # Reconstruct the true visual order if the user changed the sort or Nightcore filter
             local current_sort
             current_sort=$(cat "$_jukebox_runtime/sort-state" 2>/dev/null)
-            if [[ -n "$current_sort" && "$current_sort" != "default" && -s "$cachefile" ]]; then
-                # Re-run the exact sort script to get the ordered file list
+            if [[ -s "$cachefile" ]] && { [[ -n "$current_sort" && "$current_sort" != "default" ]] || [[ -n "$fzf_nc_state" ]]; }; then
+                local _sort_script="${current_sort:-by_title}"
+                [[ "$_sort_script" == "default" ]] && _sort_script="by_title"
                 local sorted_paths
-                sorted_paths=$("$_fzf_sort_dir/$current_sort.sh" | cut -f1)
+                sorted_paths=$("$_fzf_sort_dir/$_sort_script.sh" | cut -f1)
                 all_files=("${(@f)sorted_paths}")
             fi
             command rm -rf "$_fzf_sort_dir"
@@ -658,8 +729,8 @@ SORTEOF
             local fzf_header="TAB=toggle  Ctrl-A=all  Ctrl-D=none  ENTER=play"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
-─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length ──
-─── Sort ↓  Shift+Alt: T  A  B  D  L ──────────────────────────"
+─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
+─── Sort ↓  Shift+Alt: T  A  B  D  L  (Shift+Alt+N = All tracks) ──────────"
             fi
             
             local input_list
@@ -692,6 +763,19 @@ SORTEOF
                 n=$((n + 1))
             done
             start_idx=0
+            ;;
+        9)
+            _jukebox_nightcore_only=1
+            export _JUKEBOX_NIGHTCORE_ONLY=1
+            local -a _tmp=("${(@f)$(_jukebox_source_files original)}")
+            local i j tmp_val
+            for ((i=${#_tmp[@]}; i>1; i--)); do
+                j=$((RANDOM % i + 1))
+                tmp_val="${_tmp[$i]}"
+                _tmp[$i]="${_tmp[$j]}"
+                _tmp[$j]="$tmp_val"
+            done
+            files=("${_tmp[@]}")
             ;;
 
         q|Q)
@@ -742,11 +826,11 @@ SORTEOF
         # Remove session-specific temp files (persistent cache is kept!)
         command rm -f "$playlist" "$mpvsock" "$coverfile" "$coverfile_next" "$_jukebox_prevtmp" "$queuefile"
         [[ -n "$mpv_auth_config" ]] && command rm -f "$mpv_auth_config"
-        command rm -f "$_jukebox_runtime/sort-state"
+        command rm -f "$_jukebox_runtime/sort-state" "$_jukebox_runtime/nightcore-only"
         command rm -rf "$_fzf_sort_dir"
         # Unset exported env vars so they don't leak into the next session
         unset _JUKEBOX_PYTHON _JUKEBOX_PREVTMP _JUKEBOX_CACHE \
-              _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE _JUKEBOX_RUNTIME 2>/dev/null
+              _JUKEBOX_SHOW_FORMATNAMES _JUKEBOX_NIGHTCORE_ONLY _JUKEBOX_SOCK _JUKEBOX_QUEUEFILE _JUKEBOX_RUNTIME 2>/dev/null
         unfunction _jukebox_render _jukebox_render_next_panel _jukebox_ipc \
                    _jukebox_set _jukebox_batch_get _jukebox_extract_art _jukebox_cache_art \
                    _jukebox_cache_next_art _jukebox_calc_layout \
@@ -1287,7 +1371,7 @@ SORTEOF
         fi
         [[ -n "$_jukebox_runtime" ]] && command rm -rf -- "$_jukebox_runtime"
         [[ -n "$_jukebox_lockfd" ]] && zsystem flock -u "$_jukebox_lockfd" 2>/dev/null
-        unset _JUKEBOX_RUNTIME
+        unset _JUKEBOX_RUNTIME _JUKEBOX_NIGHTCORE_ONLY 2>/dev/null
     }
 }
 

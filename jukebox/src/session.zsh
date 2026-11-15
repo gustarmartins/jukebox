@@ -65,6 +65,7 @@ except Exception: pass
             [[ -n "$_render_volume" ]] && print -r -- "volume=$_render_volume"
             print -r -- "mute=${_render_mute:-false}"
             print -r -- "repeat=${_repeat_mode:-off}"
+            print -r -- "nightcore_only=${_jukebox_nightcore_only:-0}"
             print -r -- "path=$_render_path"
             print -r -- "title=$_render_title"
             print -r -- "artist=$_render_artist"
@@ -82,7 +83,7 @@ except Exception: pass
         _resume_source=""; _resume_ended=""; _resume_pos=0; _resume_count=0
         _resume_time=0; _resume_duration=0; _resume_speed="1.0"; _resume_pitch="1.0"
         _resume_apc="true"; _resume_rtmode="tempo"; _resume_lyrics=0
-        _resume_volume=""; _resume_mute="false"; _resume_repeat="off"
+        _resume_volume=""; _resume_mute="false"; _resume_repeat="off"; _resume_nightcore_only=0
         _resume_path=""; _resume_title=""; _resume_artist=""; _resume_album=""
 
         [[ -s "$_jukebox_state_file" && -s "$_jukebox_state_playlist" ]] || return 1
@@ -107,6 +108,7 @@ except Exception: pass
                 volume)   _resume_volume="$val" ;;
                 mute)     _resume_mute="$val" ;;
                 repeat)   _resume_repeat="$val" ;;
+                nightcore_only) _resume_nightcore_only="$val" ;;
                 path)     _resume_path="$val" ;;
                 title)    _resume_title="$val" ;;
                 artist)   _resume_artist="$val" ;;
@@ -121,6 +123,7 @@ except Exception: pass
         [[ "$_resume_pos" =~ '^[0-9]{1,9}$' ]] || _resume_pos=0
         [[ "$_resume_count" =~ '^[0-9]{1,9}$' ]] || _resume_count=0
         [[ "$_resume_lyrics" == [01] ]] || _resume_lyrics=0
+        [[ "$_resume_nightcore_only" == [01] ]] || _resume_nightcore_only=0
         [[ "$_resume_time" =~ '^[0-9]{1,9}([.][0-9]{1,6})?$' ]] || _resume_time=0
         [[ "$_resume_duration" =~ '^[0-9]{1,9}([.][0-9]{1,6})?$' ]] || _resume_duration=0
         [[ "$_resume_speed" =~ '^[0-9]{1,3}([.][0-9]{1,6})?$' ]] || _resume_speed=1.0

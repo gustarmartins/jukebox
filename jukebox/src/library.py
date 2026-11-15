@@ -17,6 +17,22 @@ import tempfile
 
 
 AUDIO_EXTENSIONS = frozenset({".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav", ".aiff", ".aif", ".alac", ".ape", ".wv"})
+NIGHTCORE_PATTERN = re.compile(
+    r"nightcore|nightstep|speed\s*up|sped\s*up|spdup|chincore|bakaricore|zcore",
+    re.IGNORECASE,
+)
+
+
+def is_nightcore_track(path: str, fields: list[str] | tuple[str, ...] | None = None) -> bool:
+    if NIGHTCORE_PATTERN.search(path):
+        return True
+    if fields:
+        for field in fields[:3]:
+            if NIGHTCORE_PATTERN.search(str(field)):
+                return True
+        if len(fields) >= 3 and str(fields[2]).strip().lower() == "osu! songs":
+            return True
+    return False
 
 
 def clean_field(value: object) -> str:
@@ -152,13 +168,20 @@ def refresh(directory: str, cache: Path, *, changed_path: str | None = None,
             scan_osu_library(osu_dir, osu_filters, str(cache))
 
 
-def source_files(directory: str, cache: Path, order: str) -> list[str]:
+def source_files(directory: str, cache: Path, order: str, *, nightcore_only: bool = False) -> list[str]:
     files = discover(directory)
+    cached_rows = read_cache(cache)
     # Include additional sources supplied by the osu! scanner.
-    for path in read_cache(cache):
+    for path in cached_rows:
         if path not in files and supported_path(path) and os.path.isfile(path):
             stat = os.stat(path)
             files[path] = [stat.st_mtime_ns, stat.st_size]
+    if nightcore_only:
+        files = {
+            path: sig
+            for path, sig in files.items()
+            if is_nightcore_track(path, cached_rows.get(path))
+        }
     if order.startswith("date_"):
         return sorted(files, key=lambda path: (files[path][0], path), reverse=order == "date_desc")
     return sorted(files, reverse=order == "name_desc")
@@ -220,6 +243,7 @@ def main() -> int:
     parser.add_argument("directory")
     parser.add_argument("cache", type=Path)
     parser.add_argument("--order", default="original")
+    parser.add_argument("--nightcore-only", action="store_true")
     parser.add_argument("--path")
     parser.add_argument("--osu-dir", default="")
     parser.add_argument("--osu-filters", default="")
@@ -227,7 +251,7 @@ def main() -> int:
     if args.command == "details":
         print("\x1f".join(details(args.directory, args.cache)))
     elif args.command == "list":
-        for path in source_files(args.directory, args.cache, args.order):
+        for path in source_files(args.directory, args.cache, args.order, nightcore_only=args.nightcore_only):
             print(path)
     else:
         if args.command == "update" and not args.path:

@@ -160,6 +160,87 @@ class LocalLibraryScanTest(unittest.TestCase):
             else:
                 self.fail(f"watcher process {watcher_pid} survived menu exit")
 
+    def test_nightcore_only_mode_filters_library_and_menu_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            music = root / "music"
+            music.mkdir()
+            normal_track = music / "Normal Artist - Normal Song.flac"
+            nc_album_track = music / "Camilot - Amore.mp3"
+            nc_title_track = music / "Groove Coverage - Runaway (1.20x Nightcore Mix).flac"
+            for path in (normal_track, nc_album_track, nc_title_track):
+                path.touch()
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            scripts = {
+                "ffprobe": (
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "base = os.path.basename(sys.argv[-1])\n"
+                    "if base == 'Camilot - Amore.mp3':\n"
+                    "    tags = {'title': 'Amore', 'artist': 'Camilot', 'album': 'Nightcore Mix'}\n"
+                    "elif 'Nightcore' in base:\n"
+                    "    tags = {'title': 'Runaway (1.20x Nightcore Mix)', 'artist': 'Groove Coverage', 'album': '7 Years and 50 Days'}\n"
+                    "else:\n"
+                    "    tags = {'title': 'Normal Song', 'artist': 'Normal Artist', 'album': 'Regular Album'}\n"
+                    "print(json.dumps({'format': {'duration': '180.0', 'tags': tags}}))\n"
+                ),
+                "mpv": (
+                    "#!/usr/bin/env python3\n"
+                    "import os, pathlib, sys\n"
+                    "playlist = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--playlist='))\n"
+                    "pathlib.Path(os.environ['JUKEBOX_TEST_PLAYLIST']).write_text(pathlib.Path(playlist).read_text())\n"
+                ),
+            }
+            for name, content in scripts.items():
+                command = fake_bin / name
+                command.write_text(content, encoding="utf-8")
+                command.chmod(0o755)
+
+            captured = root / "captured.m3u"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "JUKEBOX_DATA_DIR": str(root / "data"),
+                "JUKEBOX_MUSIC_DIR": str(music),
+                "JUKEBOX_SOURCE": "local",
+                "JUKEBOX_TEST_PLAYLIST": str(captured),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            }
+
+            result = subprocess.run(
+                ["zsh", "-dfc", f"source {shlex.quote(str(SCRIPT))}; jukebox --nightcore"],
+                input="2\n",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 1)  # Stub mpv exits immediately.
+            self.assertTrue(captured.exists(), result.stdout + result.stderr)
+            self.assertEqual(
+                captured.read_text().splitlines(),
+                [str(nc_album_track), str(nc_title_track)],
+            )
+
+            captured.unlink()
+            result_opt9 = subprocess.run(
+                ["zsh", "-dfc", f"source {shlex.quote(str(SCRIPT))}; jukebox"],
+                input="9\n",
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result_opt9.returncode, 1)
+            self.assertTrue(captured.exists(), result_opt9.stdout + result_opt9.stderr)
+            self.assertCountEqual(
+                captured.read_text().splitlines(),
+                [str(nc_album_track), str(nc_title_track)],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
