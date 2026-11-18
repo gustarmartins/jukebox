@@ -260,6 +260,13 @@ def main():
                                     shutil.copy(img_path, tmpcover)
                                     break
             if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
+                api_helper = os.path.join(os.environ.get("_JUKEBOX_SCRIPT_DIR", ""), "src", "api_client.py")
+                if os.path.isfile(api_helper):
+                    subprocess.run(
+                        [sys.executable, api_helper, "art", filepath, tmpcover,
+                         "--cache", cache_path, "--cache-only"],
+                        timeout=3, capture_output=True)
+            if not (os.path.isfile(tmpcover) and os.path.getsize(tmpcover) > 0):
                 script_dir = os.environ.get("_JUKEBOX_SCRIPT_DIR", "")
                 fallback = os.path.join(script_dir, "assets", "NO-COVER.png")
                 if os.path.isfile(fallback):

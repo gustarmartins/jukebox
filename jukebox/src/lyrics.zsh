@@ -13,6 +13,14 @@
             _lyrics_starts+=("${start:--1}")
             _lyrics_lines+=("$text")
         done < <("$_JUKEBOX_PYTHON" "$_JUKEBOX_JELLYFIN_CLIENT" lyrics "$reference" 2>/dev/null)
+        if (( ${#_lyrics_lines[@]} == 0 )) && [[ -f "$_JUKEBOX_API_CLIENT" ]]; then
+            while IFS=$'\x1f' read -r start text; do
+                [[ -z "$text" ]] && continue
+                _lyrics_starts+=("${start:--1}")
+                _lyrics_lines+=("$text")
+            done < <("$_JUKEBOX_PYTHON" "$_JUKEBOX_API_CLIENT" lyrics "$reference" \
+                --cache "$cachefile" --data-dir "$_jukebox_datadir" 2>/dev/null)
+        fi
         _jukebox_update_lyric_index
     }
 

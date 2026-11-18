@@ -13,6 +13,10 @@
                 fi
             fi
         fi
+        if [[ ! -s "$coverfile" && -f "$_JUKEBOX_API_CLIENT" ]]; then
+            "$_JUKEBOX_PYTHON" "$_JUKEBOX_API_CLIENT" art "$filepath" "$coverfile" \
+                --cache "$cachefile" --data-dir "$_jukebox_datadir" >/dev/null 2>&1
+        fi
         if [[ ! -s "$coverfile" ]]; then
             cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile" 2>/dev/null
         fi
@@ -82,6 +86,10 @@
             if [[ ${#_next_folder_art[@]} -gt 0 && -s "${_next_folder_art[1]}" ]]; then
                 cp "${_next_folder_art[1]}" "$coverfile_next" 2>/dev/null
             fi
+        fi
+        if [[ ! -s "$coverfile_next" && -f "$_JUKEBOX_API_CLIENT" ]]; then
+            "$_JUKEBOX_PYTHON" "$_JUKEBOX_API_CLIENT" art "$next_file" "$coverfile_next" \
+                --cache "$cachefile" --data-dir "$_jukebox_datadir" >/dev/null 2>&1
         fi
         if [[ ! -s "$coverfile_next" ]]; then
             cp "$_JUKEBOX_SCRIPT_DIR/assets/NO-COVER.png" "$coverfile_next" 2>/dev/null

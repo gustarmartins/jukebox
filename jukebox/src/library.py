@@ -153,6 +153,9 @@ def atomic_write(path: Path, content: str) -> None:
             pass
 
 
+_PROBED_GENRES: dict[str, str] = {}
+
+
 def probe(path: str) -> tuple[str, list[str] | None]:
     try:
         result = subprocess.run(
@@ -183,6 +186,11 @@ def probe(path: str) -> tuple[str, list[str] | None]:
         fields = [tags.get("title") or Path(path).stem, tags.get("artist") or "Unknown",
                   tags.get("album") or "Unknown", tags.get("date") or tags.get("year") or "0",
                   fmt.get("duration") or "0", number("0", "track", "tracknumber"), number("1", "disc", "discnumber")]
+        genre = clean_field(tags.get("genre") or "")
+        if genre:
+            _PROBED_GENRES[path] = genre
+        else:
+            _PROBED_GENRES.pop(path, None)
         return path, [clean_field(field) for field in fields]
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         return path, None
@@ -196,12 +204,19 @@ def refresh(directory: str, cache: Path, *, changed_path: str | None = None,
         fcntl.flock(lock, fcntl.LOCK_EX)
         rows = read_cache(cache)
         state_path = Path(str(cache) + ".files.json")
+        genres_path = Path(str(cache) + ".genres.json")
         try:
             signatures = json.loads(state_path.read_text(encoding="utf-8"))
             if not isinstance(signatures, dict):
                 signatures = {}
         except (OSError, ValueError):
             signatures = {}
+        try:
+            genres = json.loads(genres_path.read_text(encoding="utf-8"))
+            if not isinstance(genres, dict):
+                genres = {}
+        except (OSError, ValueError):
+            genres = {}
         if changed_path is None:
             disk = discover(directory)
             deleted = set(rows) - set(disk)
@@ -217,6 +232,7 @@ def refresh(directory: str, cache: Path, *, changed_path: str | None = None,
         for path in deleted:
             rows.pop(path, None)
             signatures.pop(path, None)
+            genres.pop(path, None)
         pending = sorted(path for path, signature in disk.items()
                          if path not in rows or signatures.get(path) != signature)
         if pending:
@@ -226,6 +242,11 @@ def refresh(directory: str, cache: Path, *, changed_path: str | None = None,
                     if fields is not None:
                         rows[path] = fields
                         signatures[path] = disk[path]
+                        genre = _PROBED_GENRES.pop(path, "")
+                        if genre:
+                            genres[path] = genre
+                        else:
+                            genres.pop(path, None)
                     else:
                         # Keep previous metadata on transient read failure; retry later.
                         signatures.pop(path, None)
@@ -233,6 +254,7 @@ def refresh(directory: str, cache: Path, *, changed_path: str | None = None,
                         print(f"Library cache: {index}/{len(pending)} tracks", file=sys.stderr, flush=True)
         atomic_write(cache, "".join("\t".join([path, *rows[path]]) + "\n" for path in sorted(rows)))
         atomic_write(state_path, json.dumps(signatures))
+        atomic_write(genres_path, json.dumps(genres))
         # Retain the owner's existing osu! scanner and settings integration.
         if osu_dir and changed_path is None:
             from osu_scanner import scan_osu_library

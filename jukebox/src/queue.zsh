@@ -9,6 +9,21 @@
             "$musicdir" "$cachefile" --keep-prefix "$keep_prefix"
     }
 
+    _jukebox_smart_recommend() {
+        local -a seed_args=()
+        while [[ $# -gt 0 && "$1" != "--" ]]; do
+            seed_args+=(--seed "$1")
+            shift
+        done
+        [[ "$1" == "--" ]] && shift
+        if (( ${#seed_args[@]} == 0 || $# == 0 )); then
+            print -rl -- "$@"
+            return
+        fi
+        print -rl -- "$@" | "$_JUKEBOX_PYTHON" "$_JUKEBOX_API_CLIENT" recommend \
+            --cache "$cachefile" --data-dir "$_jukebox_datadir" "${seed_args[@]}" 2>/dev/null
+    }
+
     _jukebox_add_next() {
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
@@ -206,7 +221,7 @@ except Exception:
             fi
             echo ""
             echo "🎵 Redo Queue / Select Mode:"
-            echo "  1) Browse & pick (plays from selection onward, Alt-s to shuffle rest)"
+            echo "  1) Browse & pick (ENTER=onward, Alt-r=smart recommend, Alt-s=shuffle rest)"
             echo "  2) Build queue (TAB to pick multiple, ENTER to play)"
             echo "  3) Shuffle library"
             echo "  4) Play all (A-Z)"
@@ -214,11 +229,12 @@ except Exception:
             echo "  6) Play all (Original order)"
             echo "  7) 🌙 Shuffle Nightcore only"
             echo "  8) 🌙 Browse & pick Nightcore only"
+            echo "  9) ✨ Smart Radio (recommend from current track)"
             echo "  n) 🌙 Nightcore-only filter: $_redo_nc_label"
             echo "  q) Cancel (keep current playback)"
             echo ""
 
-            read "rchoice?Choose [1-8, n, q]: "
+            read "rchoice?Choose [1-9, n, q]: "
             if [[ "$rchoice" == [nN] ]]; then
                 _jukebox_nightcore_only=$(( 1 - _jukebox_nightcore_only ))
                 export _JUKEBOX_NIGHTCORE_ONLY="$_jukebox_nightcore_only"
@@ -252,7 +268,7 @@ except Exception:
 
                 _jukebox_setup_fzf_sort
 
-                local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
+                local fzf_header="TAB=toggle  ENTER=play/queue  Alt-r=smart recommend  Alt-s=shuffle rest  ESC=cancel"
                 if [[ -s "$cachefile" ]]; then
                     fzf_header="$fzf_header
 ─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
@@ -276,7 +292,7 @@ except Exception:
                         --marker="✔ " \
                         --preview "$_jukebox_fzf_preview" \
                         --preview-window=right:50% \
-                        --expect=enter,alt-s \
+                        --expect=enter,alt-s,alt-r \
                         "${_fzf_binds[@]}")
 
                 if [[ -z "$output" ]]; then
@@ -324,7 +340,12 @@ except Exception:
 
                 new_files=("${picked_arr[@]}")
                 _redo_keep_prefix=${#picked_arr[@]}
-                if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
+                if [[ "$key_pressed" == "alt-r" ]]; then
+                    echo "✨ Building smart recommendations..."
+                    local -a rec_files=("${(@f)$(_jukebox_smart_recommend "${picked_arr[@]}" -- "${all_files[@]}")}")
+                    rec_files=("${(@)rec_files:#}")
+                    new_files+=("${rec_files[@]}")
+                elif (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
                     local -A seen
                     for x in "${picked_arr[@]}"; do seen[$x]=1; done
                     local remaining_files=()
@@ -405,6 +426,17 @@ except Exception:
             4) new_files=("${(@f)$(_jukebox_source_files name_asc)}") ;;
             5) new_files=("${(@f)$(_jukebox_source_files date_desc)}") ;;
             6) new_files=("${(@f)$(_jukebox_source_files original)}") ;;
+            9)
+                local cur_seed="${_render_path:-}"
+                local all_files=("${(@f)$(_jukebox_source_files original)}")
+                if [[ -n "$cur_seed" && ${#all_files[@]} -gt 0 ]]; then
+                    echo "✨ Building Smart Radio from current track..."
+                    _redo_keep_prefix=1
+                    local -a rec_files=("${(@f)$(_jukebox_smart_recommend "$cur_seed" -- "${all_files[@]}")}")
+                    rec_files=("${(@)rec_files:#}")
+                    new_files=("$cur_seed" "${rec_files[@]}")
+                fi
+                ;;
             *)
                 # Cancel or invalid option: return cleanly to current playback
                 printf '\e[?1049h\e[2J\e[?25l'

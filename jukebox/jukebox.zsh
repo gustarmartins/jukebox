@@ -46,6 +46,7 @@ fi
 : ${JUKEBOX_DATA_DIR:="$HOME/.jukebox-app"}
 _JUKEBOX_SCRIPT_DIR="${0:A:h}"
 _JUKEBOX_JELLYFIN_CLIENT="${_JUKEBOX_SCRIPT_DIR}/jellyfin_client.py"
+_JUKEBOX_API_CLIENT="${_JUKEBOX_SCRIPT_DIR}/src/api_client.py"
 
 # --- fzf preview command (calls external Python script) ---
 _jukebox_fzf_preview="'${_JUKEBOX_SCRIPT_DIR}/_fzf_preview.py' {1}"
@@ -141,6 +142,7 @@ jukebox() {
 Jukebox — terminal music player
 Usage: jukebox [--debug] [--nightcore|-n|--all] [--show-filenames|--show-formatnames]
        jukebox setup | doctor | jellyfin-login SERVER | jellyfin-status | jellyfin-logout
+       jukebox lastfm-setup [API_KEY] | lastfm-status | lastfm-logout
 
 Local audio: FLAC, MP3, Ogg, Opus, M4A, AAC, WAV, AIFF, ALAC, APE, WavPack.
 Set JUKEBOX_SOURCE=local (default) or jellyfin.
@@ -182,6 +184,19 @@ HELPEOF
             ;;
         jellyfin-logout)
             command python3 "$_JUKEBOX_JELLYFIN_CLIENT" logout
+            return $?
+            ;;
+        lastfm-setup)
+            shift
+            command python3 "$_JUKEBOX_API_CLIENT" lastfm-setup "$@"
+            return $?
+            ;;
+        lastfm-status)
+            command python3 "$_JUKEBOX_API_CLIENT" lastfm-status
+            return $?
+            ;;
+        lastfm-logout)
+            command python3 "$_JUKEBOX_API_CLIENT" lastfm-logout
             return $?
             ;;
     esac
@@ -543,7 +558,7 @@ ALLEOF
         echo "  3) Sort by filename (Z-A)"
         echo "  4) Sort by date (oldest first)"
         echo "  5) Sort by date (newest first)"
-        echo "  6) Browse & pick (plays from selection onward)"
+        echo "  6) Browse & pick (ENTER=onward, Alt-r=smart recommend, Alt-s=shuffle rest)"
         echo "  7) Shuffle"
         echo "  8) Build queue (TAB to pick, ENTER to play)"
         echo "  9) 🌙 Play Nightcore only (shuffle)"
@@ -611,7 +626,7 @@ ALLEOF
             
             _jukebox_setup_fzf_sort
             
-            local fzf_header="TAB=toggle  ENTER=play/queue  Alt-s=play (shuffle rest)  ESC=cancel"
+            local fzf_header="TAB=toggle  ENTER=play/queue  Alt-r=smart recommend  Alt-s=shuffle rest  ESC=cancel"
             if [[ -s "$cachefile" ]]; then
                 fzf_header="$fzf_header
 ─── Sort ↑  Alt: T=Title  A=Artist  B=Album  D=Date  L=Length  N=Nightcore ──
@@ -636,7 +651,7 @@ ALLEOF
                     --marker="✔ " \
                     --preview "$_jukebox_fzf_preview" \
                     --preview-window=right:50% \
-                    --expect=enter,alt-s \
+                    --expect=enter,alt-s,alt-r \
                     "${_fzf_binds[@]}")
                     
             if [[ -z "$output" ]]; then
@@ -682,7 +697,12 @@ ALLEOF
             
             files=("${picked_arr[@]}")
             _queue_keep_prefix=${#picked_arr[@]}
-            if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
+            if [[ "$key_pressed" == "alt-r" ]]; then
+                echo "✨ Building smart recommendations..."
+                local -a rec_files=("${(@f)$(_jukebox_smart_recommend "${picked_arr[@]}" -- "${all_files[@]}")}")
+                rec_files=("${(@)rec_files:#}")
+                files+=("${rec_files[@]}")
+            elif (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
                 local -A seen
                 for x in "${picked_arr[@]}"; do seen[$x]=1; done
                 local remaining_files=()
@@ -845,7 +865,7 @@ ALLEOF
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files _jukebox_dedupe_files \
+                   _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files _jukebox_dedupe_files _jukebox_smart_recommend \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
                    _jukebox_log _jukebox_setup_fzf_sort _jukebox_wait_cache \
                    _jukebox_stop_startup_jobs \
