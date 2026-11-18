@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 
 AUDIO_EXTENSIONS = frozenset({".flac", ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wav", ".aiff", ".aif", ".alac", ".ape", ".wv"})
@@ -21,6 +22,12 @@ NIGHTCORE_PATTERN = re.compile(
     r"nightcore|nightstep|speed\s*up|sped\s*up|spdup|chincore|bakaricore|zcore",
     re.IGNORECASE,
 )
+TEMPO_LABEL = re.compile(
+    r"[\[(]\s*(?:nightcore(?:\s+(?:mix|ver\.?|version))?|"
+    r"(?:speed\s*up|sped\s*up)(?:\s+(?:mix|ver\.?|version))?)\s*[\])]",
+    re.IGNORECASE,
+)
+LOSSLESS_EXTENSIONS = frozenset({".flac", ".alac", ".wav", ".aiff", ".aif", ".ape", ".wv"})
 
 
 def is_nightcore_track(path: str, fields: list[str] | tuple[str, ...] | None = None) -> bool:
@@ -67,6 +74,70 @@ def read_cache(path: Path) -> dict[str, list[str]]:
         return {row[0]: row[1:] for row in rows if len(row) == 8}
     except OSError:
         return {}
+
+
+def identity_text(value: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKC", value).casefold() if c.isalnum())
+
+
+def track_identity(path: str, fields: list[str] | None) -> tuple[str, ...]:
+    """Identify a song edition across copies, without merging different mixes.
+
+    osu! imports identify audio paths, not recordings: several beatmap folders
+    can contain the same song. Their cached duration is the last hit object,
+    so duration must not decide whether two imports are copies.
+    """
+    if not fields or len(fields) < 3:
+        return ("path", os.path.realpath(path))
+    title, artist, album = fields[:3]
+    artist_key = identity_text(artist)
+    if artist_key in {"", "unknown", "osuartist", "various", "variousartists"}:
+        return ("path", os.path.realpath(path))
+
+    # Generated Nightcore files can retain the original recording's title tag
+    # (e.g. "E.T. (Solo Album Version)"). Their named mix is in the filename.
+    file_artist, separator, file_title = Path(path).stem.partition(" - ")
+    if album.casefold() == "nightcore mix" and separator and identity_text(file_artist) == artist_key:
+        title = file_title
+    title_key = identity_text(TEMPO_LABEL.sub("", title))
+    if not title_key or title_key in {"audio", "unknown", "untitled", "intro", "outro", "interlude"}:
+        return ("path", os.path.realpath(path))
+    edition_tags = " ".join([Path(path).stem, *fields[:3]])
+    tempo = "nightcore" if NIGHTCORE_PATTERN.search(edition_tags) else "original"
+    return ("song", artist_key, title_key, tempo)
+
+
+def deduplicate_tracks(paths: list[str], directory: str, cache: Path, *, keep_prefix: int = 0) -> list[str]:
+    """Filter automatic queue entries; keep explicit selections/history intact.
+
+    Prefer the music library to osu! copies, then lossless files. Only choose
+    among paths actually in this queue; browsing, files and cache stay intact.
+    """
+    rows = read_cache(cache)
+    keep_prefix = max(0, min(keep_prefix, len(paths)))
+    identities = {path: track_identity(path, rows.get(path)) for path in paths}
+    seen = {identities[path] for path in paths[:keep_prefix]}
+    music = os.path.abspath(directory)
+
+    def preference(path: str) -> tuple[bool, bool, bool, str]:
+        fields = rows.get(path, [])
+        in_music = os.path.commonpath([music, os.path.abspath(path)]) == music
+        is_osu = len(fields) >= 3 and fields[2].casefold() == "osu! songs"
+        return (not in_music, is_osu, Path(path).suffix.lower() not in LOSSLESS_EXTENSIONS, path)
+
+    winners = {}
+    for path in paths[keep_prefix:]:
+        key = identities[path]
+        if key not in seen and (key not in winners or preference(path) < preference(winners[key])):
+            winners[key] = path
+
+    result = paths[:keep_prefix]
+    for path in paths[keep_prefix:]:
+        key = identities[path]
+        if key not in seen and winners.get(key) == path:
+            result.append(path)
+            seen.add(key)
+    return result
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -239,16 +310,21 @@ def details(path: str, cache: Path) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("scan", "list", "update", "details"))
+    parser.add_argument("command", choices=("scan", "list", "update", "details", "dedupe"))
     parser.add_argument("directory")
     parser.add_argument("cache", type=Path)
     parser.add_argument("--order", default="original")
     parser.add_argument("--nightcore-only", action="store_true")
+    parser.add_argument("--keep-prefix", type=int, default=0)
     parser.add_argument("--path")
     parser.add_argument("--osu-dir", default="")
     parser.add_argument("--osu-filters", default="")
     args = parser.parse_args()
-    if args.command == "details":
+    if args.command == "dedupe":
+        paths = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
+        for path in deduplicate_tracks(paths, args.directory, args.cache, keep_prefix=args.keep_prefix):
+            print(path)
+    elif args.command == "details":
         print("\x1f".join(details(args.directory, args.cache)))
     elif args.command == "list":
         for path in source_files(args.directory, args.cache, args.order, nightcore_only=args.nightcore_only):

@@ -521,7 +521,7 @@ ALLEOF
         fi
     }
 
-    local choice files=() start_idx=0
+    local choice files=() start_idx=0 _queue_keep_prefix=0 _queue_unique
     local musicdir="${JUKEBOX_MUSIC_DIR:-$HOME/Music}"
 
     local _resume_available=0
@@ -681,6 +681,7 @@ ALLEOF
             done
             
             files=("${picked_arr[@]}")
+            _queue_keep_prefix=${#picked_arr[@]}
             if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
                 local -A seen
                 for x in "${picked_arr[@]}"; do seen[$x]=1; done
@@ -789,6 +790,14 @@ ALLEOF
             ;;
     esac
 
+    # Explicit custom queues and saved sessions retain their exact occurrences.
+    # Automatic continuation should visit a recording once, even across sources.
+    if (( ! _jukebox_resuming )) && [[ "$choice" != 8 && ${#files[@]} -gt 0 ]]; then
+        if _queue_unique=$(_jukebox_dedupe_files "$_queue_keep_prefix" "${files[@]}"); then
+            files=("${(@f)_queue_unique}")
+        fi
+    fi
+
     if [[ ${#files[@]} -eq 0 ]]; then
         echo "No music found in the $_jukebox_source library"
         _jukebox_stop_startup_jobs
@@ -836,7 +845,7 @@ ALLEOF
                    _jukebox_cache_next_art _jukebox_calc_layout \
                    _jukebox_center _jukebox_padline _jukebox_fast_get \
                    _jukebox_fetch_next_meta _jukebox_clear_next_meta \
-                   _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files \
+                   _jukebox_add_next _jukebox_shuffle_upcoming _jukebox_redo_queue _jukebox_queue_picker _jukebox_get_input_list _jukebox_source_files _jukebox_dedupe_files \
                    _jukebox_load_lyrics _jukebox_update_lyric_index _jukebox_render_lyrics \
                    _jukebox_log _jukebox_setup_fzf_sort _jukebox_wait_cache \
                    _jukebox_stop_startup_jobs \

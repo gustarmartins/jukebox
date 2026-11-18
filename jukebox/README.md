@@ -13,6 +13,7 @@ the terminal, and control playback without leaving the command line.
 - **Live queue picker** — press `L` during playback to see the queue and jump to any track
 - **Keyboard controls** — seek, skip, volume, mute, repeat, speed/pitch, and help (`?`)
 - **Incremental indexing** — refresh edited files, retry failed probes, and track live library changes
+- **Duplicate filtering** — automatic queues skip matching song editions across music-folder copies and osu! imports
 - **Jellyfin streaming** — browse and direct-stream a server over LAN or Tailscale
 - **Lyrics** — `.lrc`, `.elrc`, `.txt`, embedded tags, and Jellyfin lyrics
 
@@ -258,6 +259,13 @@ Press `L` during playback to open the live queue manager:
 | `ESC` | Return to player |
 
 ### Queue builder (option 8)
+
+Local play-all, shuffle, and automatic continuation after browsing filter copies
+with matching artist/title and edition metadata. Music-folder copies take
+priority over osu! imports, then lossless copies over lossy ones. Originals,
+Nightcore versions, and named live/remix editions stay separate. All files remain
+available in the browser; explicit selections, Play Next additions, custom
+queues, and resumed sessions keep their chosen occurrences.
 
 | Key | Action |
 |-----|--------|

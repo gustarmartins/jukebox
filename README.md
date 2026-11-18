@@ -17,6 +17,7 @@ graphics for album art, fuzzy browsing, queues, and synchronized lyrics.
 - Headless `mpv` playback through Python Unix socket IPC
 - Volume, mute, repeat-track/repeat-queue controls, and in-player help (`?`)
 - Incremental local indexing with live refresh for edited, added, and removed tracks
+- Duplicate filtering across local music and osu! imports in automatic queues
 - Crash-safe resume, private runtime files, and protection against conflicting launches
 - `chafa` integration for high-quality Kitty terminal graphics over album art
 - Jellyfin library browsing and direct streaming over LAN or Tailscale

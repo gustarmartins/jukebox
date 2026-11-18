@@ -1,3 +1,14 @@
+    _jukebox_dedupe_files() {
+        local keep_prefix="$1"
+        shift
+        if [[ "$_jukebox_source" != local ]]; then
+            print -rl -- "$@"
+            return
+        fi
+        print -rl -- "$@" | "$_JUKEBOX_PYTHON" "$_JUKEBOX_SCRIPT_DIR/src/library.py" dedupe \
+            "$musicdir" "$cachefile" --keep-prefix "$keep_prefix"
+    }
+
     _jukebox_add_next() {
         # leave altscreen for fzf
         printf '\e[?1049l\e[?25h'
@@ -226,7 +237,7 @@ except Exception:
             rchoice=1
         fi
 
-        local new_files=()
+        local new_files=() _redo_keep_prefix=0 _redo_unique
         case "$rchoice" in
             1)
                 local all_files=("${(@f)$(_jukebox_source_files name_asc)}")
@@ -312,6 +323,7 @@ except Exception:
                 done
 
                 new_files=("${picked_arr[@]}")
+                _redo_keep_prefix=${#picked_arr[@]}
                 if (( last_idx != -1 && last_idx < ${#all_files[@]} )); then
                     local -A seen
                     for x in "${picked_arr[@]}"; do seen[$x]=1; done
@@ -401,6 +413,13 @@ except Exception:
                 return
                 ;;
         esac
+
+        if [[ "$rchoice" != 2 && ${#new_files[@]} -gt 0 ]]; then
+            _jukebox_wait_cache
+            if _redo_unique=$(_jukebox_dedupe_files "$_redo_keep_prefix" "${new_files[@]}"); then
+                new_files=("${(@f)_redo_unique}")
+            fi
+        fi
 
         if [[ ${#new_files[@]} -gt 0 ]]; then
             printf '%s\n' "${new_files[@]}" > "$playlist"
